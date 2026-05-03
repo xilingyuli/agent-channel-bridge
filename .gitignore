@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+chat_logs/
+logs/
+pids/
+.env
+*.secret.yaml
