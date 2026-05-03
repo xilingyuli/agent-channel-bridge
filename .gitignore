@@ -5,3 +5,15 @@ logs/
 pids/
 .env
 *.secret.yaml
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store

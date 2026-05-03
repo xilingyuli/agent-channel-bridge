@@ -1,0 +1,13 @@
+.dockerignore
+__pycache__/
+*.pyc
+.git/
+.gitignore
+chat_logs/
+logs/
+pids/
+tests/
+*.md
+Makefile
+bridge.sh
+AGENTS.default.md
