@@ -362,8 +362,6 @@ class AcpWorker:
         ctx_lines.append("  4. 工具执行慢或卡住时 — 告知用户 '正在执行，请稍候'")
         ctx_lines.append("  5. 遇到问题需要用户决策时 — 询问意见")
         ctx_lines.append("  6. 长时间无文字输出时（超过10秒）— 必须输出一条进度")
-        ctx_lines.append("")
-        ctx_lines.append("  注意：思考过程和内部推理不要用 <message> 包裹，这些不会发给用户")
 
         ctx_lines.append("</tips>")
         ctx_lines.append("")
