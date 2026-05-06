@@ -4,6 +4,10 @@
 [![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 [![PyPI version](https://img.shields.io/badge/pypi-v1.0.0-orange)](https://pypi.org/project/agent-channel-bridge/)
 
+<p align="center">
+  <img src="assets/banner.png" alt="Agent Channel Bridge Banner" width="800">
+</p>
+
 将 QQ 消息无缝路由到 AI Coding Agent（如 OpenCode、Claude Code），实现**在 QQ 里直接指挥 AI Agent 写代码**。
 
 ## 🎯 用途
@@ -180,33 +184,9 @@ make run
 
 ## ⚙️ 原理
 
-```
-┌──────────────────────────────────────────────────────────┐
-│  QQ                                                        │
-│  你发消息 → NapCat (WebSocket :3001)                      │
-└──────────────────┬───────────────────────────────────────┘
-                   │ OneBot v11 协议
-                   ▼
-┌──────────────────────────────────────────────────────────┐
-│  Agent Channel Bridge (python -m agent_channel_bridge)     │
-│                                                          │
-│  1. 收到消息 → 解析类型（私聊/群聊/@）                      │
-│  2. 路由匹配 → 找到对应的 Worker                          │
-│  3. 中断忙碌 → 检测 Session 忙碌则关闭重建                   │
-│  4. 发送 prompt → Agent 通过 ACP 协议接收任务               │
-│  5. 监听回复 → 累积 agent_message_chunk → step_finish 完整 │
-│  6. 回复发回 → WS → NapCat → QQ                           │
-└──────────────────┬───────────────────────────────────────┘
-                   │ ACP 协议 (JSON-RPC over stdio)
-                   ▼
-┌──────────────────────────────────────────────────────────┐
-│  AI Coding Agent (OpenCode / Claude Code 等)              │
-│                                                          │
-│  - 独立 tmux 进程，每个 Worker 一个                        │
-│  - 收到消息后自动执行（读文件、写代码、跑测试...）           │
-│  - 实时流式回复，bridge 自动收集完整回复                     │
-└──────────────────────────────────────────────────────────┘
-```
+<p align="center">
+  <img src="assets/architecture.png" alt="Agent Channel Bridge 架构原理图" width="100%">
+</p>
 
 ### 核心技术：ACP 协议
 

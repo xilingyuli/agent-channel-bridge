@@ -166,6 +166,31 @@ class AcpWorker:
             if ut in ("agent_message_chunk", "step_finish", "tool_call_start"):
                 log.info(f"[{self.agent_name}] 📩 UPDATE type={ut}")
 
+        # request_permission — 优先处理，自动允许（无头模式）
+        # 必须在"id"分支之前，因为 request_permission 同时有 id 和 method
+        if msg.get("method") == "session/request_permission":
+            req_id = msg.get("id")
+            if req_id is not None:
+                options = msg.get("params", {}).get("options", [])
+                option_id = "once"
+                for opt in options:
+                    if opt.get("kind") == "allow_always":
+                        option_id = opt["optionId"]
+                        log.info(f"[{self.agent_name}] 🔓 自动允许权限 (always)")
+                        break
+                else:
+                    log.info(f"[{self.agent_name}] 🔓 自动允许权限 (once)")
+                reply = {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {
+                        "optionId": option_id,
+                    },
+                }
+                self.proc.stdin.write((json.dumps(reply) + "\n").encode())
+                await self.proc.stdin.drain()
+            return
+
         # JSON-RPC 回复
         if "id" in msg:
             msg_id = str(msg["id"])
@@ -182,8 +207,36 @@ class AcpWorker:
                 usage = msg["result"].get("usage", {})
                 cost = msg["result"].get("cost", 0)
                 log.info(f"[{self.agent_name}] 🏁 prompt 完成 (reason={reason}, cost={cost})")
-                # 清除 prompt_msg_map 记录
-                self._prompt_msg_map.pop(msg_id, None)
+
+                # 兼容：检查 _session_buf 中是否有残留文本（agent 忘记用 <message> 标签的情况）
+                sid_from_map = self._prompt_msg_map.pop(msg_id, None)
+                if sid_from_map and sid_from_map in self._session_buf:
+                    leftover = self._session_buf.pop(sid_from_map, "")
+                    leftover = leftover.strip()
+                    if leftover:
+                        # 尝试提取 <message> 标签内的内容（可能部分被打出后又有残留）
+                        import re as _re
+                        msgs = _re.findall(r'<message>(.*?)</message>', leftover, _re.DOTALL)
+                        if msgs:
+                            # 有标签但前面没被截获？可能分 chunk 进来的，已发的部分已 pop
+                            for mtext in msgs:
+                                mtext = mtext.strip()
+                                if not mtext:
+                                    continue
+                                log.info(f"[{self.agent_name}] 🏁 最终消息(标签): {mtext[:60]}")
+                                qq_msg = self._last_qq_msg.get(sid_from_map)
+                                if qq_msg and self.on_reply:
+                                    asyncio.create_task(self.on_reply(
+                                        self.name, self.agent_name, mtext, qq_msg
+                                    ))
+                        else:
+                            # 纯文本残留 — agent 忘了用 <message>，兜底发出
+                            log.info(f"[{self.agent_name}] 🏁 最终消息(兜底): {leftover[:60]}")
+                            qq_msg = self._last_qq_msg.get(sid_from_map)
+                            if qq_msg and self.on_reply:
+                                asyncio.create_task(self.on_reply(
+                                    self.name, self.agent_name, leftover, qq_msg
+                                ))
             
             # 普通 RPC 回复
             fut = self._pending_requests.pop(msg_id, None)
@@ -318,6 +371,42 @@ class AcpWorker:
         if qq_msg and qq_msg.get("type") == "group" and user_id:
             ctx_lines.append(f"⚠️ 重要：在群聊中回复时，第一行必须用 @用户QQ号 开头！否则用户收不到提示。")
             ctx_lines.append(f"   例如回复 \"@{user_id} 你好呀～\"")
+
+        # 处理 CQ reply（引用消息）
+        if qq_msg and qq_msg.get("reply_id"):
+            from .onebot import send_api_action
+            try:
+                msg_type = qq_msg.get("type", "private")
+                if msg_type == "group":
+                    group_id = qq_msg.get("from_id", "")
+                    if group_id and group_id not in ("TEST_USER_ID", ""):
+                        result = await send_api_action("get_msg", {"message_id": int(qq_msg["reply_id"])})
+                        if result and result.get("status") == "ok":
+                            data = result.get("data", {})
+                            reply_msg = data.get("message", [])
+                            reply_sender = data.get("sender", {}).get("nickname", "用户")
+                            ctx_lines.append(f"")
+                            ctx_lines.append(f"【用户引用了之前的消息】")
+                            ctx_lines.append(f"发送者: {reply_sender}")
+                            # 提取回复消息中的文本和图片
+                            reply_text_parts = []
+                            reply_images = []
+                            for seg in reply_msg if isinstance(reply_msg, list) else []:
+                                if seg.get("type") == "text":
+                                    reply_text_parts.append(seg.get("data", {}).get("text", ""))
+                                elif seg.get("type") == "image":
+                                    img_url = seg.get("data", {}).get("url", "")
+                                    if img_url:
+                                        reply_images.append(img_url)
+                            if reply_text_parts:
+                                ctx_lines.append(f"消息内容: {''.join(reply_text_parts).strip()}")
+                            if reply_images:
+                                for i, url in enumerate(reply_images):
+                                    ctx_lines.append(f"引用的图片{i+1}: {url}")
+                                    ctx_lines.append(f"  （你可以用 <img>{url}</img> 把这张图片再发出去）")
+                            ctx_lines.append(f"")
+            except Exception as e:
+                log.warning(f"[{self.agent_name}] 获取引用消息失败: {e}")
 
         # 图片
         if qq_msg and qq_msg.get("has_image"):

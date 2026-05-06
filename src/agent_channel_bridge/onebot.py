@@ -161,6 +161,13 @@ def parse_onebot(data: dict) -> Optional[dict]:
     is_mention = False
     message = raw_msg.strip()
 
+    # 提取 CQ reply 信息
+    reply_id = None
+    reply_match = re.match(r'^\[CQ:reply,id=(\d+)\](.*)', message)
+    if reply_match:
+        reply_id = reply_match.group(1)
+        message = reply_match.group(2).strip()
+
     if msg_type == "group":
         group_id = str(data.get("group_id", ""))
         # Check for @mention via CQ at
@@ -191,5 +198,6 @@ def parse_onebot(data: dict) -> Optional[dict]:
         "sender_name": sender_name,
         "message": message,
         "is_mention": is_mention,
+        "reply_id": reply_id,
         "raw": data,
     }
