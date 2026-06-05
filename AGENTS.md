@@ -22,6 +22,7 @@ agent-channel-bridge/
 │       ├── __main__.py         # 入口、WS 主循环、管理命令
 │       ├── config.py           # 配置加载、路由匹配（通配符）、聊天日志
 │       ├── acp_worker.py       # ACP Worker — Agent 子进程管理
+│       ├── acp_wrapper_claude.py # ACP 包装器 — Claude Code CLI 适配器
 │       ├── worker_manager.py   # Worker 生命周期管理
 │       ├── onebot.py           # OneBot v11 协议（消息构建/解析/API）
 │       └── rpc_log.py          # JSON-RPC 日志
@@ -177,3 +178,25 @@ def _reset_config():
 ```
 
 测试 OneBot 解析使用 `_make_msg()` 辅助函数构建模拟消息体。
+
+## 🤖 Claude Code 作为 Worker
+
+`acp_wrapper_claude.py` 实现了 ACP ↔ Claude Code CLI 的协议转换，让不支持 ACP 的 Agent（如 Claude Code）也能接入 bridge。
+
+**工作原理：** 包装器实现最小 ACP JSON-RPC 服务端，对 `session/prompt` 请求调用 `claude -p` 打印模式，通过 `session/update` 通知流式返回输出。
+
+**配置：**
+```yaml
+workers:
+  claude_agent:
+    name: claude_agent
+    start_command: python -m agent_channel_bridge.acp_wrapper_claude
+    work_dir: /path/to/workspace
+```
+
+**环境要求：**
+- `ANTHROPIC_API_KEY` — DeepSeek API key（或其他 Anthropic 兼容 API）
+- `ANTHROPIC_BASE_URL` — API 端点（默认 https://api.deepseek.com/anthropic）
+- `claude` CLI 已安装（`npm install -g @anthropic-ai/claude-code`）
+
+**限制：** Claude Code `-p` 模式是 stateless 的，包装器通过维护会话历史来模拟持续对话。`max_history=10` 轮后旧上下文会被裁剪。

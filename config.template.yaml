@@ -27,7 +27,15 @@ routes:
     worker: my_agent
 
 workers:
+  # OpenCode agent (default)
   my_agent:
     name: my_agent
     start_command: opencode acp
     work_dir: /path/to/agent/workspace
+
+  # Claude Code agent (via ACP wrapper)
+  claude_agent:
+    name: claude_agent
+    start_command: python -m agent_channel_bridge.acp_wrapper_claude
+    work_dir: /path/to/claude/workspace
+    # Requires ANTHROPIC_API_KEY and ANTHROPIC_BASE_URL in environment

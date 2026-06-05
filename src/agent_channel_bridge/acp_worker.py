@@ -71,12 +71,14 @@ class AcpWorker:
             restored = {}
             for route_key, sid in data.items():
                 try:
-                    await self._send_request("session/resume", {
+                    result = await self._send_request("session/resume", {
                         "sessionId": sid,
                         "cwd": self.work_dir,
                     })
-                    restored[route_key] = sid
-                    log.info(f"[{self.agent_name}] 🔄 恢复 Session [{route_key}]: {sid}")
+                    # Use returned sessionId (wrapper may create new one)
+                    new_sid = result.get("sessionId", sid)
+                    restored[route_key] = new_sid
+                    log.info(f"[{self.agent_name}] 🔄 恢复 Session [{route_key}]: {new_sid}")
                 except Exception as e:
                     log.info(f"[{self.agent_name}] ⏭ Session [{route_key}] 恢复失败，后续会重建: {e}")
             if restored:
@@ -173,9 +175,11 @@ class AcpWorker:
             if req_id is not None:
                 options = msg.get("params", {}).get("options", [])
                 option_id = "once"
+                outcome = "allow_once"
                 for opt in options:
                     if opt.get("kind") == "allow_always":
                         option_id = opt["optionId"]
+                        outcome = "allow_always"
                         log.info(f"[{self.agent_name}] 🔓 自动允许权限 (always)")
                         break
                 else:
@@ -184,7 +188,10 @@ class AcpWorker:
                     "jsonrpc": "2.0",
                     "id": req_id,
                     "result": {
-                        "optionId": option_id,
+                        "option": {
+                            "optionId": option_id,
+                        },
+                        "outcome": outcome,
                     },
                 }
                 self.proc.stdin.write((json.dumps(reply) + "\n").encode())
@@ -237,7 +244,7 @@ class AcpWorker:
                                 asyncio.create_task(self.on_reply(
                                     self.name, self.agent_name, leftover, qq_msg
                                 ))
-            
+
             # 普通 RPC 回复
             fut = self._pending_requests.pop(msg_id, None)
             if fut and not fut.done():
@@ -325,32 +332,20 @@ class AcpWorker:
 
         # 检查 session 是否忙碌（有正在处理的 prompt）
         if sid in self._prompt_msg_map.values():
-            # session 正在处理中 → close 旧 session，重建新 session
-            log.info(f"[{self.agent_name}] 🔌 Session [{route_key}] 忙碌，准备打断重建")
-            try:
-                await self._send_request("session/close", {"sessionId": sid})
-            except Exception as e:
-                log.warning(f"[{self.agent_name}] session/close [{route_key}] 失败: {e}")
-            del self._route_sessions[route_key]
-            self._pending_msgs.pop(sid, None)
-            self._session_buf.pop(sid, None)
-            for mid in list(self._prompt_msg_map.keys()):
-                if self._prompt_msg_map[mid] == sid:
-                    del self._prompt_msg_map[mid]
-
-            # 重建新 session
+            # session 正在处理中 → 新建一个 session 来处理这条新消息
+            log.info(f"[{self.agent_name}] 🔌 Session [{route_key}] 忙碌，新建临时 session 处理新消息")
             try:
                 result = await self._send_request("session/new", {
                     "cwd": self.work_dir,
                     "mcpServers": [],
                 })
                 sid = result["sessionId"]
+                self._route_sessions[route_key] = sid
+                self._save_sessions()
+                log.info(f"[{self.agent_name}] 📝 新建临时 Session [{route_key}]: {sid}")
             except Exception as e:
-                log.error(f"[{self.agent_name}] ❌ session/new 失败: {e}", exc_info=True)
+                log.error(f"[{self.agent_name}] ❌ session/new(临时) 失败: {e}", exc_info=True)
                 return
-            self._route_sessions[route_key] = sid
-            self._save_sessions()
-            log.info(f"[{self.agent_name}] 📝 重建 Session [{route_key}]: {sid}")
 
         self._last_qq_msg[sid] = qq_msg or {}
         self._session_buf.pop(sid, None)  # 清除上一轮残留

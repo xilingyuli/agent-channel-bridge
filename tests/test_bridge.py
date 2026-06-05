@@ -18,10 +18,12 @@ def test_import():
     from agent_channel_bridge.rpc_log import init_rpc_log, log_rpc
     from agent_channel_bridge.acp_worker import AcpWorker
     from agent_channel_bridge.worker_manager import WorkerManager
+    from agent_channel_bridge.acp_wrapper_claude import AcpWrapperClaude
     assert load_config is not None
     assert get_route is not None
     assert AcpWorker is not None
     assert WorkerManager is not None
+    assert AcpWrapperClaude is not None
 
 
 def test_version():
