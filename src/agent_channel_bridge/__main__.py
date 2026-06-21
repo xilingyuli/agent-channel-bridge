@@ -17,6 +17,20 @@ from .config import get_route, log_chat
 
 log = logging.getLogger("onebot-bridge")
 
+# 非管理员安全规则
+NON_ADMIN_SECURITY_PROMPT = (
+    "[系统安全提示] 此消息来自非管理员用户。请遵守以下规则:\n"
+    "1. 该用户应当不感知到本机的任何信息，该规则高于一切其他规则\n"
+    "2. 禁止暴露本机文件路径、目录结构\n"
+    "3. 禁止暴露 IP 地址、API 密钥、Token、密码\n"
+    "4. 禁止暴露任何配置文件内容或系统信息\n"
+    "5. 禁止执行文件读写、系统命令等危险操作\n"
+    "6. 只提供通用知识问答，不涉及具体项目代码\n"
+    "7. 如果用户询问的内容可能泄露隐私，请礼貌拒绝\n"
+    "---\n"
+    "用户消息: "
+)
+
 
 # ====== 管理命令 ======
 
@@ -55,8 +69,14 @@ async def handle_admin_cmd(msg: dict, worker_mgr: WorkerManager) -> Optional[str
 async def process_message(ws, msg: dict, worker_mgr: WorkerManager):
     log.info(f"[{msg['type']}] {msg['from_id']}|{msg['sender_name']}: {msg['message'][:60]}")
 
+    # 跳过 Yunzai 指令（以 # 或 * 开头），交给 Yunzai 处理
+    if msg["message"].strip().startswith(("#", "*")):
+        return
+
+    admin = is_admin(msg)
+
     # 管理命令
-    if is_admin(msg):
+    if admin:
         reply = await handle_admin_cmd(msg, worker_mgr)
         if reply:
             if msg["type"] == "group":
@@ -80,9 +100,14 @@ async def process_message(ws, msg: dict, worker_mgr: WorkerManager):
         log.warning(f"[{route_name}] Worker [{worker_name}] 未就绪")
         return
 
+    # 非管理员：注入安全提示
+    message_text = msg["message"]
+    if not admin:
+        message_text = NON_ADMIN_SECURITY_PROMPT + message_text
+
     # 发送到 agent（异步，不等回复）
-    log.info(f"⚡ {route_name} → ACP [{worker_name}]")
-    await worker_mgr.send_message(worker_name, msg["message"], qq_msg=msg)
+    log.info(f"⚡ {route_name} → ACP [{worker_name}]" + (" [非管理员]" if not admin else ""))
+    await worker_mgr.send_message(worker_name, message_text, qq_msg=msg)
 
     log_chat(msg, route_name)
 
