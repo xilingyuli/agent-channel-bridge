@@ -111,6 +111,23 @@ async def send_private_msg(user_id: int, text: str) -> bool:
     return bool(result.get("status") == "ok")
 
 
+# ====== 超长消息缓存 ======
+
+MSG_CACHE: dict[str, str] = {}  # msg_id → 完整文本
+MAX_MSG_LEN = 1500
+CHUNK_SIZE = 1800
+
+
+async def send_chunked(msg_type: str, target_id: int, full_text: str):
+    """将长文本分段发送（私聊或群聊）"""
+    chunks = [full_text[i:i+CHUNK_SIZE] for i in range(0, len(full_text), CHUNK_SIZE)]
+    send = send_private_msg if msg_type == "private" else send_group_msg
+    for i, chunk in enumerate(chunks):
+        prefix = f"[{i+1}/{len(chunks)}] " if len(chunks) > 1 else ""
+        await send(target_id, prefix + chunk)
+    log.info(f"📤 分段发送完成: {msg_type} {target_id}, {len(chunks)} 段, 共 {len(full_text)} 字")
+
+
 # ====== 回复回调（IO 链路独立）=====
 
 async def on_worker_reply(worker_key: str, agent_name: str,
@@ -123,14 +140,34 @@ async def on_worker_reply(worker_key: str, agent_name: str,
 
     user_id = int(qq_msg.get("user_id", 0))
     from_id = qq_msg.get("from_id", "")
+    msg_type = qq_msg["type"]
+
+    # 超长消息：缓存到本地，回复摘要
+    if len(reply_text) > MAX_MSG_LEN:
+        msg_id = str(uuid.uuid4())[:6]
+        MSG_CACHE[msg_id] = reply_text
+        preview = reply_text[:50].replace("\n", " ").replace("\r", "")
+        short = (f"[消息过长({len(reply_text)}字)已缓存，id={msg_id}]\n"
+                 f"前50字: {preview}...\n"
+                 f"回复「展示消息 {msg_id}」查看完整内容")
+        try:
+            if msg_type == "group":
+                if from_id and from_id != "TEST_USER_ID":
+                    await send_group_msg(int(from_id), short)
+            elif msg_type == "private":
+                if user_id:
+                    await send_private_msg(user_id, short)
+        except Exception as e:
+            log.error(f"发送超长预览失败: {e}")
+        return
 
     try:
-        if qq_msg["type"] == "group":
+        if msg_type == "group":
             if not from_id or from_id == "TEST_USER_ID":
                 log.warning(f"跳过测试群消息: from_id={from_id}")
                 return
             await send_group_msg(int(from_id), reply_text)
-        elif qq_msg["type"] == "private":
+        elif msg_type == "private":
             if not user_id or user_id == 0:
                 log.warning(f"跳过测试私聊: user_id={qq_msg.get('user_id')}")
                 return

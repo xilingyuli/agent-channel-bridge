@@ -11,7 +11,7 @@ import websockets
 
 from . import config as cfg
 from .rpc_log import init_rpc_log
-from .onebot import on_worker_reply, send_group_msg, send_private_msg, parse_onebot
+from .onebot import on_worker_reply, send_group_msg, send_private_msg, parse_onebot, MSG_CACHE, send_chunked
 from .worker_manager import WorkerManager
 from .config import get_route, log_chat
 
@@ -71,6 +71,29 @@ async def process_message(ws, msg: dict, worker_mgr: WorkerManager):
 
     # 跳过 Yunzai 指令（以 # 或 * 开头），交给 Yunzai 处理
     if msg["message"].strip().startswith(("#", "*")):
+        return
+
+    # 超长消息检索命令：展示消息 <id>
+    import re as _re
+    m = _re.match(r'^展示消息\s*(\S+)', msg["message"].strip())
+    if m:
+        msg_id = m.group(1).strip('「」""\'\'""')
+        full_text = MSG_CACHE.get(msg_id)
+        if full_text:
+            target_id = int(msg["from_id"])
+            try:
+                await send_chunked(msg["type"], target_id, full_text)
+            except Exception as e:
+                log.error(f"分段发送失败: {e}")
+                await send_private_msg(int(msg["user_id"]), f"发送失败: {e}")
+                return
+            MSG_CACHE.pop(msg_id, None)  # 发送成功后才清除缓存
+        else:
+            text = f"未找到消息 id={msg_id}，可能已过期或不存在"
+            if msg["type"] == "group":
+                await send_group_msg(int(msg["from_id"]), text)
+            else:
+                await send_private_msg(int(msg["user_id"]), text)
         return
 
     admin = is_admin(msg)
