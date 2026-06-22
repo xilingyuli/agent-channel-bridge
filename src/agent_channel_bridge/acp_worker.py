@@ -46,8 +46,15 @@ class AcpWorker:
         self._session_admin_private: dict[str, bool] = {}
         # sessionId → 管理员私聊的原始文本缓冲区
         self._session_raw_buf: dict[str, str] = {}
-        # sessionId → [qq_msg, ...]（FIFO 队列，每次 prompt 推入，回复时 peek，prompt 完成时 pop）
-        self._pending_qq_msgs: dict[str, list[dict]] = {}
+        # 按 key 分类的频控缓冲区与上次发送时间（key: tool_call, tool_call_update_bash 等）
+        self._rate_limit_buf: dict[str, dict[str, str]] = {}
+        self._rate_limit_last: dict[str, dict[str, float]] = {}
+        # 运行时动态配置路径
+        self._runtime_config_path = os.path.join(work_dir, ".bridge_runtime.json")
+        # sessionId → 当前 prompt 的运行时配置缓存（prompt 开始时读取一次）
+        self._session_runtime_config: dict[str, dict] = {}
+        # sessionId → [(timestamp, qq_msg), ...]（FIFO 队列，每次 prompt 推入，回复时 peek，prompt 完成时 pop）
+        self._pending_qq_msgs: dict[str, list[tuple[float, dict]]] = {}
         # msg_id → sessionId (用来在 prompt result 时反查 session)
         self._prompt_msg_map: dict[str, str] = {}
         # 回调: on_reply(worker_name, agent_name, reply_text, qq_msg)
@@ -55,6 +62,7 @@ class AcpWorker:
         # 统一回复收口
         self._reply_queue: asyncio.Queue = asyncio.Queue()
         self._reply_worker_task: Optional[asyncio.Task] = None
+        self._reply_seq = 0  # 回复消息序号，用于追踪入队/出队配对
         # session 持久化路径
         self._session_file = os.path.join(work_dir, ".bridge_sessions.json")
 
@@ -70,47 +78,157 @@ class AcpWorker:
 
     # -------- 统一回复收口 --------
 
+    def _clean_stale_qq_msgs(self, sid: str):
+        """清理超过 1 小时的僵尸 qq_msg 条目"""
+        q_list = self._pending_qq_msgs.get(sid, [])
+        cutoff = time.time() - 3600
+        self._pending_qq_msgs[sid] = [(ts, qm) for ts, qm in q_list if ts > cutoff]
+
     def _push_qq_msg(self, sid: str, qq_msg: dict):
         """将 qq_msg 推入 session 的待回复 FIFO 队列"""
         self._pending_qq_msgs.setdefault(sid, [])
-        self._pending_qq_msgs[sid].append(qq_msg)
+        self._clean_stale_qq_msgs(sid)
+        self._pending_qq_msgs[sid].append((time.time(), qq_msg or {}))
 
     def _peek_qq_msg(self, sid: str) -> dict | None:
         """查看 session 队列中下一个待回复的 qq_msg（不弹出）"""
         q_list = self._pending_qq_msgs.get(sid, [])
-        return q_list[0] if q_list else None
+        return q_list[0][1] if q_list else None
 
     def _pop_qq_msg(self, sid: str) -> dict | None:
         """弹出 session 队列中已完成的 prompt 对应的 qq_msg"""
         q_list = self._pending_qq_msgs.get(sid, [])
-        return q_list.pop(0) if q_list else None
+        result = q_list.pop(0)[1] if q_list else None
+        self._clean_stale_qq_msgs(sid)
+        return result
 
     def _enqueue_reply(self, sid: str, text: str):
         """从 session 队列 peek qq_msg，将回复推入统一发送队列"""
         qq_msg = self._peek_qq_msg(sid)
         if qq_msg and text.strip():
-            log.info(f"[{self.agent_name}] 📥 回复入队 [{sid[:12]}...]: {text[:40]}")
-            self._reply_queue.put_nowait((self.name, self.agent_name, text, qq_msg))
+            self._reply_seq += 1
+            seq = self._reply_seq
+            qsize = self._reply_queue.qsize()
+            log.info(f"[{self.agent_name}] 📥 入队 #{seq} (队列{qsize}) [{sid[:12]}...]: {text[:40]}")
+            self._reply_queue.put_nowait((self.name, self.agent_name, text, qq_msg, seq))
 
     def _enqueue_reply_direct(self, text: str, qq_msg: dict):
         """直接用给定的 qq_msg 推入统一发送队列（用于忙碌回复等场景）"""
         if qq_msg and text.strip():
-            log.info(f"[{self.agent_name}] 📥 直接回复入队: {text[:40]}")
-            self._reply_queue.put_nowait((self.name, self.agent_name, text, qq_msg))
+            self._reply_seq += 1
+            seq = self._reply_seq
+            qsize = self._reply_queue.qsize()
+            log.info(f"[{self.agent_name}] 📥 入队 #{seq} (队列{qsize}): {text[:40]}")
+            self._reply_queue.put_nowait((self.name, self.agent_name, text, qq_msg, seq))
 
-    def _flush_raw_buf(self, sid: str):
-        """管理员私聊原始缓冲：step_finish / prompt 完成时发送，去除 <message> 标签"""
+    def _flush_raw_buf(self, sid: str, message_only: bool = False):
+        """发送 _session_raw_buf 积攒的内容。
+        message_only=True: 只取 <message> 块内文本（缺头尾时兜底）
+        message_only=False: 去标签后全量发送"""
         if not self._session_admin_private.get(sid):
             return
         raw = self._session_raw_buf.get(sid, "")
-        if raw.strip():
-            import re as _re
-            clean = _re.sub(r'</?message>', '', raw).strip()
-            if clean:
-                qq_msg = self._peek_qq_msg(sid)
-                if qq_msg:
-                    self._enqueue_reply_direct(clean, qq_msg)
-            self._session_raw_buf[sid] = ""
+        if not raw.strip():
+            return
+        import re as _re
+        if message_only:
+            text = self._extract_msg_content(raw)
+        else:
+            text = _re.sub(r'</?message>', '', raw).strip()
+        if text:
+            qq_msg = self._peek_qq_msg(sid)
+            if qq_msg:
+                self._enqueue_reply_direct(text, qq_msg)
+        self._session_raw_buf[sid] = ""
+
+    @staticmethod
+    def _extract_msg_content(raw: str) -> str:
+        """只提取 <message> 块内文本。缺标签时兜底全返回。"""
+        import re as _re
+        has_open = "<message>" in raw
+        has_close = "</message>" in raw
+        if not has_open and not has_close:
+            return raw.strip()
+        if has_open and has_close:
+            msgs = _re.findall(r'<message>(.*?)</message>', raw, _re.DOTALL)
+            return "\n".join(m.strip() for m in msgs if m.strip()).strip() or raw.strip()
+        if has_open and not has_close:
+            idx = raw.index("<message>") + len("<message>")
+            return raw[idx:].strip()
+        # has_close but no open
+        idx = raw.index("</message>")
+        return raw[:idx].strip()
+
+    def _relpath(self, filepath: str) -> str:
+        """将绝对路径转为相对于 HOME 的路径（~ 前缀）"""
+        home = os.environ.get("HOME") or os.path.expanduser("~")
+        if filepath.startswith(home):
+            return "~" + filepath[len(home):]
+        return filepath
+
+    def _load_runtime_config(self) -> dict:
+        """从运行时配置文件中读取所有配置，文件不存在或异常时返回空 dict"""
+        try:
+            if os.path.isfile(self._runtime_config_path):
+                with open(self._runtime_config_path) as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return {}
+
+    def _send_rate_limited(self, sid: str, key: str, msg: str):
+        """频控发送：同一 key 下首条总是发，后续间隔 >= 60s 才发，否则积攒"""
+        last = self._rate_limit_last.setdefault(key, {}).get(sid, 0)
+        if not last or time.time() - last >= 60:
+            buf = self._rate_limit_buf.get(key, {}).get(sid, "")
+            if buf.strip():
+                msg = buf + "\n" + msg
+                self._rate_limit_buf.setdefault(key, {})[sid] = ""
+            self._rate_limit_last[key][sid] = time.time()
+            self._enqueue_reply_direct(msg, self._peek_qq_msg(sid))
+        else:
+            b = self._rate_limit_buf.setdefault(key, {}).setdefault(sid, "")
+            self._rate_limit_buf[key][sid] = b + ("\n" + msg) if b else msg
+
+    def _cleanup_rate_limit(self, sid: str):
+        """清除指定 session 的频控缓存"""
+        for key in self._rate_limit_buf:
+            self._rate_limit_buf[key].pop(sid, None)
+        for key in self._rate_limit_last:
+            self._rate_limit_last[key].pop(sid, None)
+
+    def _try_forward_tool_result(self, sid: str, update: dict):
+        """管理员私聊：转发工具执行结果。read/write/edit 只发文件路径摘要，其余工具发完整输出"""
+        if not self._session_admin_private.get(sid):
+            return
+        status = update.get("status", "")
+        if status != "completed":
+            return
+        kind = update.get("kind", "")
+        if kind in ("read", "write", "edit"):
+            filepath = (update.get("rawInput", {}).get("filepath", "") or
+                        update.get("rawInput", {}).get("filePath", ""))
+            if not filepath:
+                locs = update.get("locations", [])
+                filepath = locs[0].get("path", "") if locs else ""
+            if filepath:
+                self._enqueue_reply_direct(f"{kind} {self._relpath(filepath)}", self._peek_qq_msg(sid))
+            return
+        # 其他工具：发完整输出
+        result_text = ""
+        raw_out = update.get("rawOutput", {})
+        if isinstance(raw_out, dict) and raw_out.get("output", "").strip():
+            result_text = raw_out["output"]
+        if not result_text:
+            items = update.get("content", [])
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, dict):
+                        inner = item.get("content", {})
+                        if isinstance(inner, dict):
+                            result_text += inner.get("text", "")
+        if result_text.strip():
+            self._enqueue_reply_direct(result_text, self._peek_qq_msg(sid))
 
     async def _reply_worker(self):
         """统一回复收口：从队列取回复，按序调用 on_reply 发送"""
@@ -119,7 +237,9 @@ class AcpWorker:
                 item = await self._reply_queue.get()
                 if item is None:  # shutdown
                     break
-                wkey, aname, text, qq_msg = item
+                wkey, aname, text, qq_msg, seq = item
+                qsize = self._reply_queue.qsize()
+                log.info(f"[{self.agent_name}] 📤 出队 #{seq} (剩余{qsize}): {text[:40]}")
                 if self.on_reply:
                     await self.on_reply(wkey, aname, text, qq_msg)
                 self._reply_queue.task_done()
@@ -247,11 +367,9 @@ class AcpWorker:
             req_id = msg.get("id")
             if req_id is not None:
                 options = msg.get("params", {}).get("options", [])
-                option_id = options[0]["optionId"] if options else ""
                 outcome = "allow_once"
                 for opt in options:
                     if opt.get("kind") == "allow_always":
-                        option_id = opt["optionId"]
                         outcome = "allow_always"
                         log.info(f"[{self.agent_name}] 🔓 自动允许权限 (always)")
                         break
@@ -261,8 +379,8 @@ class AcpWorker:
                     "jsonrpc": "2.0",
                     "id": req_id,
                     "result": {
-                        "option": {"optionId": option_id},
-                        "outcome": outcome,
+                        "reply": outcome,
+                        "message": "",
                     },
                 }
                 self.proc.stdin.write((json.dumps(reply) + "\n").encode())
@@ -312,10 +430,12 @@ class AcpWorker:
                             log.info(f"[{self.agent_name}] 🏁 最终消息(兜底): {leftover[:60]}")
                             self._enqueue_reply(sid_from_map, leftover)
 
-                # prompt 完成后弹出该 session 的 qq_msg，并清空原始缓冲
+                # prompt 完成后清空原始缓冲和 tool_call 频控缓冲，再弹出 qq_msg
                 if sid_from_map:
-                    self._pop_qq_msg(sid_from_map)
                     self._flush_raw_buf(sid_from_map)
+                    self._session_runtime_config.pop(sid_from_map, None)
+                    self._cleanup_rate_limit(sid_from_map)
+                    self._pop_qq_msg(sid_from_map)
 
             # 普通 RPC 回复
             fut = self._pending_requests.pop(msg_id, None)
@@ -337,84 +457,110 @@ class AcpWorker:
         update_type = update.get("sessionUpdate", "")
         content = update.get("content", {})
 
-        # 从通知中获取 sessionId
         sid = params.get("sessionId", "")
         if not sid:
             return
 
-        # 记录 session 活动时间
         self._session_last_activity[sid] = time.time()
 
-        # 跟踪工具执行状态 + 自动进度通知（管理员私聊专用，每轮仅首次）
-        if update_type == "tool_call":
-            self._session_tool_running[sid] = True
-            if self._session_admin_private.get(sid) and not self._session_progress_sent.get(sid):
-                self._session_progress_sent[sid] = True
-                tool_name = update.get("title", "") or "工具"
-                self._enqueue_reply_direct(f"收到～正在执行 {tool_name}...", self._peek_qq_msg(sid))
-        elif update_type == "tool_call_update":
-            status = update.get("status", "")
-            if status == "in_progress":
+        is_admin = self._session_admin_private.get(sid)
+
+        if is_admin:
+            # ====== 管理员私聊模式 ======
+            if update_type == "agent_thought_chunk":
+                if not self._session_progress_sent.get(sid):
+                    self._session_progress_sent[sid] = True
+                    self._enqueue_reply_direct("思考中……", self._peek_qq_msg(sid))
+
+            elif update_type == "tool_call":
                 self._session_tool_running[sid] = True
-            # 管理员私聊：转发所有工具状态更新（含 completed / failed / in_progress）
-            if self._session_admin_private.get(sid):
-                result_text = ""
-                raw_out = update.get("rawOutput", {})
-                if isinstance(raw_out, dict) and raw_out.get("output", "").strip():
-                    result_text = raw_out["output"]
-                if not result_text:
-                    items = update.get("content", [])
-                    if isinstance(items, list):
-                        for item in items:
-                            if isinstance(item, dict):
-                                inner = item.get("content", {})
-                                if isinstance(inner, dict):
-                                    result_text += inner.get("text", "")
-                if result_text.strip():
-                    self._enqueue_reply_direct(result_text, self._peek_qq_msg(sid))
-        elif update_type == "step_finish":
-            # 管理员私聊：暴露中间状态详情
-            if self._session_admin_private.get(sid):
+                kind = update.get("kind", "")
+                raw_title = update.get("title", "") or "工具"
+                if kind in ("read", "write", "edit"):
+                    locs = update.get("locations", [])
+                    path = locs[0].get("path", "") if locs else ""
+                    tool_name = f"{kind} {self._relpath(path)}" if path else raw_title
+                elif kind in ("other", "search") and "Search" in raw_title:
+                    tool_name = raw_title[:100]
+                elif kind in ("execute", "bash"):
+                    tool_name = "bash"
+                else:
+                    tool_name = raw_title
+                prefix = "收到～" if not self._session_progress_sent.get(sid) else ""
+                self._session_progress_sent[sid] = True
+                msg = f"{prefix}正在执行 {tool_name}..."
+                self._send_rate_limited(sid, "tool_call", msg)
+
+            elif update_type == "tool_call_update":
+                if update.get("status", "") == "in_progress":
+                    self._session_tool_running[sid] = True
+                # bash 工具结果：按 show_bash_msg 模式动态控制
+                kind = update.get("kind", "")
+                st = update.get("status", "")
+                if kind == "execute" and st == "completed":
+                    cfg = self._session_runtime_config.get(sid, {})
+                    mode = int(cfg.get("show_bash_msg", 0))
+                    if mode == 1:
+                        ri = update.get("rawInput", {})
+                        msg = f"{kind} " + " ".join(ri.keys())
+                        self._send_rate_limited(sid, "tool_call_update_bash", msg)
+                    elif mode == 2:
+                        ri = update.get("rawInput", {})
+                        lines = [f"{k}={v}" for k, v in ri.items()]
+                        msg = "\n".join(lines)
+                        self._send_rate_limited(sid, "tool_call_update_bash", msg)
+                    # mode 0: 不发
+
+            elif update_type == "step_finish":
                 raw = (content.get("text", "") or content.get("reasoning", "") or "").strip()
                 if raw:
                     import re as _re
                     clean = _re.sub(r'</?message>', '', raw).strip()
                     if clean:
                         self._enqueue_reply_direct(clean, self._peek_qq_msg(sid))
-            # step_finish 是自然断点，清空积攒的原始缓冲
-            self._flush_raw_buf(sid)
+                self._flush_raw_buf(sid, message_only=True)
 
-        # 只关注最终输出的文本块
-        if update_type == "agent_message_chunk":
-            if content.get("type") == "text":
-                text = content.get("text", "")
-                clean = text
-                for ch in ["┃", "╹", "▣", "■", "▌", "▐", "▀", "▄", "░", "▒", "▓",
-                           "│", "║", "═", "╔", "╗", "╚", "╝", "╠", "╣", "╦", "╩", "╬"]:
-                    clean = clean.replace(ch, "")
-                if clean.strip():
-                    self._session_buf.setdefault(sid, "")
-                    self._session_buf[sid] += clean
-
-                    # 检测到 </message> → 提取 message 块发送
-                    # 管理员私聊跳过此路径，统一由原始缓冲 + 事件驱动发送
-                    if "</message>" in self._session_buf[sid] and not self._session_admin_private.get(sid):
-                        full = self._session_buf.pop(sid, "")
-                        import re as _re
-                        msgs = _re.findall(r'<message>(.*?)</message>', full, _re.DOTALL)
-                        for mtext in msgs:
-                            mtext = mtext.strip()
-                            if not mtext:
-                                continue
-                            log.info(f"[{self.agent_name}] 📬 条: {mtext[:60]}")
-                            self._enqueue_reply(sid, mtext)
-                    elif "</message>" in self._session_buf[sid]:
-                        self._session_buf.pop(sid, "")  # 丢弃，管理员私聊走原始缓冲
-
-                    # 管理员私聊：积累原始输出，事件触发时发送
-                    if self._session_admin_private.get(sid):
+            elif update_type == "agent_message_chunk":
+                if content.get("type") == "text":
+                    text = content.get("text", "")
+                    clean = text
+                    for ch in ["┃", "╹", "▣", "■", "▌", "▐", "▀", "▄", "░", "▒", "▓",
+                               "│", "║", "═", "╔", "╗", "╚", "╝", "╠", "╣", "╦", "╩", "╬"]:
+                        clean = clean.replace(ch, "")
+                    if clean.strip():
                         self._session_raw_buf.setdefault(sid, "")
                         self._session_raw_buf[sid] += clean
+
+        else:
+            # ====== 普通模式（非管理员 + 群聊）======
+            if update_type == "tool_call":
+                self._session_tool_running[sid] = True
+
+            elif update_type == "tool_call_update":
+                if update.get("status", "") == "in_progress":
+                    self._session_tool_running[sid] = True
+
+            elif update_type == "agent_message_chunk":
+                if content.get("type") == "text":
+                    text = content.get("text", "")
+                    clean = text
+                    for ch in ["┃", "╹", "▣", "■", "▌", "▐", "▀", "▄", "░", "▒", "▓",
+                               "│", "║", "═", "╔", "╗", "╚", "╝", "╠", "╣", "╦", "╩", "╬"]:
+                        clean = clean.replace(ch, "")
+                    if clean.strip():
+                        self._session_buf.setdefault(sid, "")
+                        self._session_buf[sid] += clean
+
+                        if "</message>" in self._session_buf[sid]:
+                            full = self._session_buf.pop(sid, "")
+                            import re as _re
+                            msgs = _re.findall(r'<message>(.*?)</message>', full, _re.DOTALL)
+                            for mtext in msgs:
+                                mtext = mtext.strip()
+                                if not mtext:
+                                    continue
+                                log.info(f"[{self.agent_name}] 📬 条: {mtext[:60]}")
+                                self._enqueue_reply(sid, mtext)
 
     async def send_message(self, text: str, qq_msg: dict = None):
         """发送消息到 agent，立即返回，不等待回复"""
@@ -475,6 +621,8 @@ class AcpWorker:
             self._session_tool_running.pop(sid, None)
             self._session_progress_sent.pop(sid, None)
             self._session_admin_private.pop(sid, None)
+            self._session_runtime_config.pop(sid, None)
+            self._cleanup_rate_limit(sid)
             self._session_raw_buf.pop(sid, None)
             self._session_buf.pop(sid, None)
             self._session_last_activity.pop(sid, None)
@@ -504,6 +652,7 @@ class AcpWorker:
         self._session_progress_sent.pop(sid, None)  # 重置进度消息标记
         self._session_raw_buf.pop(sid, None)  # 清除上一轮原始缓冲
         self._session_admin_private[sid] = is_admin_private
+        self._session_runtime_config[sid] = self._load_runtime_config()
 
         await self._do_send_prompt(sid, route_key, text, qq_msg)
 
@@ -688,9 +837,12 @@ class AcpWorker:
             self._session_tool_running.pop(sid, None)
             self._session_progress_sent.pop(sid, None)
             self._session_admin_private.pop(sid, None)
+            self._session_runtime_config.pop(sid, None)
             self._session_raw_buf.pop(sid, None)
             self._pending_qq_msgs.pop(sid, None)
         self._prompt_msg_map.clear()
+        self._rate_limit_buf.clear()
+        self._rate_limit_last.clear()
         self._save_sessions()
         log.info(f"[{self.agent_name}] 🧹 已重置 {closed} 个 session{'，' + str(errors) + ' 个失败' if errors else ''}")
         return {"closed": closed, "errors": errors}
@@ -709,6 +861,8 @@ class AcpWorker:
             self._session_tool_running.pop(sid, None)
             self._session_progress_sent.pop(sid, None)
             self._session_admin_private.pop(sid, None)
+            self._session_runtime_config.pop(sid, None)
+            self._cleanup_rate_limit(sid)
             self._session_raw_buf.pop(sid, None)
             self._pending_qq_msgs.pop(sid, None)
             for mid in list(self._prompt_msg_map):

@@ -166,12 +166,16 @@ async def on_worker_reply(worker_key: str, agent_name: str,
             if not from_id or from_id == "TEST_USER_ID":
                 log.warning(f"跳过测试群消息: from_id={from_id}")
                 return
-            await send_group_msg(int(from_id), reply_text)
+            ok = await send_group_msg(int(from_id), reply_text)
+            if not ok:
+                log.error(f"发送群聊消息失败: group_id={from_id}")
         elif msg_type == "private":
             if not user_id or user_id == 0:
                 log.warning(f"跳过测试私聊: user_id={qq_msg.get('user_id')}")
                 return
-            await send_private_msg(user_id, reply_text)
+            ok = await send_private_msg(user_id, reply_text)
+            if not ok:
+                log.error(f"发送私聊消息失败: user_id={user_id}")
     except (ValueError, TypeError) as e:
         log.warning(f"跳过无效消息 (user_id={qq_msg.get('user_id')} from_id={from_id}): {e}")
     except Exception as e:
