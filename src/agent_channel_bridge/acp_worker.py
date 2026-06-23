@@ -55,6 +55,8 @@ class AcpWorker:
         self._session_runtime_config: dict[str, dict] = {}
         # sessionId → [(timestamp, qq_msg), ...]（FIFO 队列，每次 prompt 推入，回复时 peek，prompt 完成时 pop）
         self._pending_qq_msgs: dict[str, list[tuple[float, dict]]] = {}
+        # 忙碌时排队的 prompt：(text, route_key, qq_msg)
+        self._pending_prompts: dict[str, list[tuple[str, str, dict]]] = {}
         # msg_id → sessionId (用来在 prompt result 时反查 session)
         self._prompt_msg_map: dict[str, str] = {}
         # 回调: on_reply(worker_name, agent_name, reply_text, qq_msg)
@@ -458,6 +460,8 @@ class AcpWorker:
                     self._session_runtime_config.pop(sid_from_map, None)
                     self._cleanup_rate_limit(sid_from_map)
                     self._pop_qq_msg(sid_from_map)
+                    # 检查排队队列，处理下一条
+                    await self._process_pending_queue(sid_from_map)
 
             # 普通 RPC 回复
             fut = self._pending_requests.pop(msg_id, None)
@@ -618,9 +622,11 @@ class AcpWorker:
             # 无工具时 60s 无活动 → 异常；有工具时放宽到 300s（工具可能较慢）
             max_idle = 300 if tool_running else 60
             if idle_seconds < max_idle:
+                self._pending_prompts.setdefault(sid, []).append((text, route_key, qq_msg))
+                count = len(self._pending_prompts[sid])
                 log.info(f"[{self.agent_name}] 🔒 Session [{route_key}] 上一条任务处理中"
-                         f" (tool={tool_running}, idle={idle_seconds:.0f}s)，提示用户等待")
-                self._enqueue_reply_direct("上一条任务处理中，请稍候～", qq_msg)
+                         f" (tool={tool_running}, idle={idle_seconds:.0f}s)，入队 #{count}")
+                self._enqueue_reply_direct(f"上一条任务处理中，已加入排队（第 {count} 条）", qq_msg)
                 return
 
             # 异常状态：无活动超过阈值 → 清理僵死 prompt 并重试
@@ -662,6 +668,31 @@ class AcpWorker:
         self._session_buf.pop(sid, None)  # 清除上一轮残留
         self._session_progress_sent.pop(sid, None)  # 重置进度消息标记
         self._session_raw_buf.pop(sid, None)  # 清除上一轮原始缓冲
+        self._session_admin_private[sid] = is_admin_private
+        self._session_runtime_config[sid] = self._load_runtime_config()
+
+        await self._do_send_prompt(sid, route_key, text, qq_msg)
+
+    async def _process_pending_queue(self, sid: str):
+        """当前 prompt 完成后，处理 session 的排队队列"""
+        queue = self._pending_prompts.get(sid)
+        if not queue:
+            return
+        text, route_key, qq_msg = queue.pop(0)
+        if not queue:
+            del self._pending_prompts[sid]
+
+        is_admin_private = False
+        if qq_msg:
+            is_private = qq_msg.get("type") == "private"
+            if is_private:
+                route = config.get("routes", {}).get(route_key)
+                is_admin_private = bool(route and route.get("admin"))
+
+        self._push_qq_msg(sid, qq_msg or {})
+        self._session_buf.pop(sid, None)
+        self._session_progress_sent.pop(sid, None)
+        self._session_raw_buf.pop(sid, None)
         self._session_admin_private[sid] = is_admin_private
         self._session_runtime_config[sid] = self._load_runtime_config()
 
@@ -854,6 +885,7 @@ class AcpWorker:
             self._session_raw_buf.pop(sid, None)
             self._pending_qq_msgs.pop(sid, None)
         self._prompt_msg_map.clear()
+        self._pending_prompts.clear()
         self._rate_limit_buf.clear()
         self._rate_limit_last.clear()
         self._save_sessions()
@@ -878,6 +910,7 @@ class AcpWorker:
             self._cleanup_rate_limit(sid)
             self._session_raw_buf.pop(sid, None)
             self._pending_qq_msgs.pop(sid, None)
+            self._pending_prompts.pop(sid, None)
             for mid in list(self._prompt_msg_map):
                 if self._prompt_msg_map[mid] == sid:
                     self._prompt_msg_map.pop(mid, None)
