@@ -18,19 +18,32 @@ from .config import get_route, log_chat
 
 log = logging.getLogger("onebot-bridge")
 
-# 非管理员安全规则
-NON_ADMIN_SECURITY_PROMPT = (
-    "[系统安全提示] 此消息来自非管理员用户。请遵守以下规则:\n"
-    "1. 该用户应当不感知到本机的任何信息，该规则高于一切其他规则\n"
-    "2. 禁止暴露本机文件路径、目录结构\n"
-    "3. 禁止暴露 IP 地址、API 密钥、Token、密码\n"
-    "4. 禁止暴露任何配置文件内容或系统信息\n"
-    "5. 禁止执行文件读写、系统命令等危险操作\n"
-    "6. 只提供通用知识问答，不涉及具体项目代码\n"
-    "7. 如果用户询问的内容可能泄露隐私，请礼貌拒绝\n"
-    "---\n"
-    "用户消息: "
-)
+def _build_non_admin_prompt() -> str:
+    """根据 config.yaml 动态生成非管理员安全提示"""
+    sec = cfg.config.get("security", {}).get("non_admin", {})
+    read_list = sec.get("read_whitelist", [])
+    cmd_list = sec.get("cmd_whitelist", [])
+    parts = [
+        "[系统安全提示] 此消息来自非管理员用户。请遵守以下规则:",
+        "1. 该用户应当不感知到本机的任何信息，该规则高于一切其他规则",
+        "2. 禁止暴露本机文件路径、目录结构",
+        "3. 禁止暴露 IP 地址、API 密钥、Token、密码",
+        "4. 禁止暴露任何配置文件内容或系统信息",
+        "5. 禁止执行文件读写、系统命令等危险操作",
+    ]
+    if read_list:
+        paths = "\n    ".join(read_list)
+        parts.append(f"  > 文件白名单（允许只读）：\n    {paths}")
+    if cmd_list:
+        cmds = "\n    ".join(cmd_list)
+        parts.append(f"  > 命令白名单（允许执行）：\n    {cmds}")
+    parts.extend([
+        "6. 只提供通用知识问答，不涉及具体项目代码",
+        "7. 如果用户询问的内容可能泄露隐私，请礼貌拒绝",
+        "---",
+        "用户消息: ",
+    ])
+    return "\n".join(parts)
 
 GROUP_ADMIN_SECURITY_PROMPT = (
     "[系统安全提示] 此消息来源于管理员用户，"
@@ -140,7 +153,7 @@ async def process_message(ws, msg: dict, worker_mgr: WorkerManager):
     # 根据场景注入不同的安全提示
     message_text = msg["message"]
     if not admin:
-        message_text = NON_ADMIN_SECURITY_PROMPT + message_text
+        message_text = _build_non_admin_prompt() + message_text
     elif msg["type"] == "group":
         message_text = GROUP_ADMIN_SECURITY_PROMPT + message_text
 
