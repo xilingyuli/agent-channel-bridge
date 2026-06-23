@@ -587,6 +587,9 @@ class AcpWorker:
                                 mtext = mtext.strip()
                                 if not mtext:
                                     continue
+                                mtext = _re.sub(r'</?message>', '', mtext).strip()
+                                if not mtext:
+                                    continue
                                 log.info(f"[{self.agent_name}] 📬 条: {mtext[:60]}")
                                 self._enqueue_reply(sid, mtext)
 
@@ -723,6 +726,10 @@ class AcpWorker:
         user_id = qq_msg.get("user_id", "") if qq_msg else ""
         is_admin = self._session_admin_private.get(sid, False)
         ctx_lines.append(f"你正在通过QQ和用户对话。来源: {src}，发送者: {sender}。")
+        # 群聊时附加群名片
+        card = qq_msg.get("card_name", "") if qq_msg else ""
+        if card and card != sender:
+            ctx_lines.append(f"用户群名片: {card}")
         ctx_lines.append(f"此次消息视作{'管理员' if is_admin else '非管理员'}消息。")
 
         # 处理 CQ reply（引用消息）
@@ -780,7 +787,8 @@ class AcpWorker:
         ctx_lines.append("     第二条回复")
         ctx_lines.append("     </message>")
         ctx_lines.append("  2. 每条 <message> 输出后立即发送给用户，无需等待")
-        ctx_lines.append("  3. 思考过程、内部推理不要用 <message> 包裹，不会发给用户")
+        ctx_lines.append("  3. ⚠️ 注意 <message> 标签的开闭状态，确保不嵌套、不遗漏闭合标签")
+        ctx_lines.append("  4. 思考过程、内部推理不要用 <message> 包裹，不会发给用户")
         ctx_lines.append("")
         ctx_lines.append("【发送图片/文件/语音 - 标签格式】")
         ctx_lines.append("  1. 在 <message> 内的任意位置插入标签即可发送媒体：")

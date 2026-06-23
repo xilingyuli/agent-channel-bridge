@@ -230,6 +230,7 @@ def parse_onebot(data: dict) -> Optional[dict]:
 
     sender = data.get("sender", {})
     sender_name = sender.get("nickname", "") or sender.get("card", "") or f"QQ{user_id}"
+    card_name = sender.get("card", "") if msg_type == "group" else ""
 
     is_mention = False
     message = raw_msg.strip()
@@ -269,6 +270,7 @@ def parse_onebot(data: dict) -> Optional[dict]:
         "user_id": user_id,
         "from_id": from_id,
         "sender_name": sender_name,
+        "card_name": card_name,
         "message": message,
         "is_mention": is_mention,
         "reply_id": reply_id,
