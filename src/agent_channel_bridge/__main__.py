@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import traceback
 from typing import Optional
 
@@ -135,6 +136,32 @@ async def process_message(ws, msg: dict, worker_mgr: WorkerManager):
     log_chat(msg, route_name)
 
 
+# ====== 重启通知 ======
+
+def _send_restart_notify():
+    """restart_bridge.sh 触发的启动，给管理员发重启成功通知"""
+    flag = "/tmp/bridge_restart.flag"
+    if not os.path.isfile(flag):
+        return
+    try:
+        routes = cfg.config.get("routes", {})
+        admin_uid = None
+        for route_key, route in routes.items():
+            if route.get("admin") and route_key.startswith("qq:private:"):
+                admin_uid = int(route_key.split(":")[2])
+                break
+        if admin_uid:
+            import asyncio as _asyncio
+            _asyncio.create_task(
+                send_private_msg(admin_uid, "桥接层重启成功 ✅")
+            )
+            log.info(f"已发送重启通知给管理员 {admin_uid}")
+    except Exception as e:
+        log.warning(f"重启通知发送失败: {e}")
+    finally:
+        os.remove(flag)
+
+
 # ====== WS 主循环 ======
 
 async def main_loop(worker_mgr: WorkerManager):
@@ -145,6 +172,9 @@ async def main_loop(worker_mgr: WorkerManager):
             async with websockets.connect(ws_url, ping_interval=30) as ws:
                 cfg._ws_conn = ws
                 log.info(f"✅ 已连接 {ws_url}")
+
+                # 重启通知（仅 restarts_bridge.sh 触发的启动）
+                _send_restart_notify()
 
                 async for raw in ws:
                     try:
