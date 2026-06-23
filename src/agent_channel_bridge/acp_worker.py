@@ -390,7 +390,12 @@ class AcpWorker:
         if msg.get("method") == "session/request_permission":
             req_id = msg.get("id")
             if req_id is not None:
+                request_id = msg.get("params", {}).get("toolCall", {}).get("toolCallId", "")
                 options = msg.get("params", {}).get("options", [])
+                tc = msg.get("params", {}).get("toolCall", {})
+                log.info(f"[{self.agent_name}] 🔍 权限请求 id={req_id} requestID={request_id}"
+                         f" tool={tc.get('title','?')} kind={tc.get('kind','?')}"
+                         f" path={json.dumps(tc.get('rawInput',{}))[:120]}")
                 outcome = "allow_once"
                 for opt in options:
                     if opt.get("kind") == "allow_always":
@@ -403,12 +408,16 @@ class AcpWorker:
                     "jsonrpc": "2.0",
                     "id": req_id,
                     "result": {
-                        "reply": outcome,
-                        "message": "",
+                        "outcome": {
+                            "outcome": "selected",
+                            "optionId": "always" if outcome == "allow_always" else "once",
+                        },
                     },
                 }
+                log.info(f"[{self.agent_name}] 🔍 权限响应: {json.dumps(reply)}")
                 self.proc.stdin.write((json.dumps(reply) + "\n").encode())
                 await self.proc.stdin.drain()
+                log.info(f"[{self.agent_name}] 🔍 权限响应已写入 stdin, drain完成")
             return
 
         # JSON-RPC 回复
@@ -504,6 +513,10 @@ class AcpWorker:
             elif update_type == "tool_call_update":
                 kind = update.get("kind", "")
                 st = update.get("status", "")
+                # 🔍 诊断日志：追踪外部文件工具的状态变化
+                if st in ("in_progress", "completed", "failed"):
+                    log.info(f"[{self.agent_name}] 🔍 tool_call_update kind={kind} status={st}"
+                             f" title={update.get('title','')[:40]}")
                 if st == "in_progress":
                     self._session_tool_running[sid] = True
                     detail = self._collect_tool_detail(update)
@@ -711,9 +724,6 @@ class AcpWorker:
         is_admin = self._session_admin_private.get(sid, False)
         ctx_lines.append(f"你正在通过QQ和用户对话。来源: {src}，发送者: {sender}。")
         ctx_lines.append(f"此次消息视作{'管理员' if is_admin else '非管理员'}消息。")
-        if qq_msg and qq_msg.get("type") == "group" and user_id:
-            ctx_lines.append(f"⚠️ 重要：在群聊中回复时，第一行必须用 @用户QQ号+空格 开头！否则用户收不到提示。")
-            ctx_lines.append(f"   例如回复 \"@{user_id} 你好呀～\"")
 
         # 处理 CQ reply（引用消息）
         if qq_msg and qq_msg.get("reply_id"):
@@ -770,8 +780,7 @@ class AcpWorker:
         ctx_lines.append("     第二条回复")
         ctx_lines.append("     </message>")
         ctx_lines.append("  2. 每条 <message> 输出后立即发送给用户，无需等待")
-        ctx_lines.append("  3. 群聊时每条 <message> 第一行必须 @用户QQ号+空格")
-        ctx_lines.append("  4. 思考过程、内部推理不要用 <message> 包裹，不会发给用户")
+        ctx_lines.append("  3. 思考过程、内部推理不要用 <message> 包裹，不会发给用户")
         ctx_lines.append("")
         ctx_lines.append("【发送图片/文件/语音 - 标签格式】")
         ctx_lines.append("  1. 在 <message> 内的任意位置插入标签即可发送媒体：")
@@ -787,13 +796,10 @@ class AcpWorker:
         ctx_lines.append("")
         ctx_lines.append("【进度同步约定】")
         ctx_lines.append("  ⚠️ 以下场景**必须**输出 <message> 告知用户进度：")
-        ctx_lines.append("  1. **收到用户消息后，立即输出一条确认消息** <message> 再开始工作")
-        ctx_lines.append("     例如: <message>收到～我来看看...</message>")
-        ctx_lines.append("  2. 开始执行重要工具/命令前 — 告诉用户你要做什么")
-        ctx_lines.append("  3. 用户指令执行完毕时 — 告知结果或下一步")
-        ctx_lines.append("  4. 工具执行慢或卡住时 — 告知用户 '正在执行，请稍候'")
-        ctx_lines.append("  5. 遇到问题需要用户决策时 — 询问意见")
-        ctx_lines.append("  6. 长时间无文字输出时（超过10秒）— 必须输出一条进度")
+        ctx_lines.append('  1. **开始工作前，用 <message> 块输出一句简短确认**，让用户知道你收到了消息、即将开始处理')
+        ctx_lines.append("     例如: <message>收到～我来看看</message>")
+        ctx_lines.append("  2. 开始执行搜索/重要工具/命令前 — 告诉用户你要做什么")
+        ctx_lines.append("  3. 遇到问题需要用户决策时 — 询问意见")
 
         ctx_lines.append("</tips>")
         ctx_lines.append("")

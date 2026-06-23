@@ -44,7 +44,7 @@ SEND_FILE_TAG_RE = re.compile(r"<file>(.*?)</file>", re.IGNORECASE | re.DOTALL)
 
 
 def _build_message_segments(text: str) -> list:
-    """将回复文本解析为 OneBot v11 消息段列表，支持标签格式"""
+    """将回复文本解析为 OneBot v11 消息段列表，支持标签格式和 @ 提及"""
     # 提取所有标签中的 URL（去除空白和换行）
     image_urls = [u.strip().replace("\n", "").replace("\r", "") for u in SEND_IMAGE_TAG_RE.findall(text)]
     audio_urls = [u.strip().replace("\n", "").replace("\r", "") for u in SEND_AUDIO_TAG_RE.findall(text)]
@@ -58,7 +58,20 @@ def _build_message_segments(text: str) -> list:
 
     segments = []
     if clean:
-        segments.append({"type": "text", "data": {"text": clean[:2000]}})
+        # 拆分 @QQ号 为 OneBot at 段
+        at_re = re.compile(r"@(\d{5,11})")
+        last_end = 0
+        for m in at_re.finditer(clean):
+            if m.start() > last_end:
+                segments.append({"type": "text", "data": {"text": clean[last_end:m.start()]}})
+            segments.append({"type": "at", "data": {"qq": m.group(1)}})
+            last_end = m.end()
+        if last_end < len(clean):
+            remaining = clean[last_end:].strip()
+            if remaining:
+                segments.append({"type": "text", "data": {"text": remaining[:2000]}})
+        if last_end == 0:
+            segments.append({"type": "text", "data": {"text": clean[:2000]}})
     for url in image_urls:
         if os.path.isfile(url):
             try:
@@ -93,8 +106,10 @@ def _build_message_segments(text: str) -> list:
     return segments
 
 
-async def send_group_msg(group_id: int, text: str) -> bool:
+async def send_group_msg(group_id: int, text: str, at_user: str = "") -> bool:
     segments = _build_message_segments(text)
+    if at_user and not text.lstrip().startswith("@"):
+        segments.insert(0, {"type": "at", "data": {"qq": at_user}})
     result = await send_api_action("send_group_msg", {
         "group_id": group_id,
         "message": segments,
@@ -168,7 +183,7 @@ async def on_worker_reply(worker_key: str, agent_name: str,
         try:
             if msg_type == "group":
                 if from_id and from_id != "TEST_USER_ID":
-                    await send_group_msg(int(from_id), short)
+                    await send_group_msg(int(from_id), short, str(user_id))
             elif msg_type == "private":
                 if user_id:
                     await send_private_msg(user_id, short)
@@ -181,7 +196,9 @@ async def on_worker_reply(worker_key: str, agent_name: str,
             if not from_id or from_id == "TEST_USER_ID":
                 log.warning(f"跳过测试群消息: from_id={from_id}")
                 return
-            ok = await send_group_msg(int(from_id), reply_text)
+            ok = await send_group_msg(int(from_id), reply_text, str(user_id))
+            if not ok:
+                log.error(f"发送群聊消息失败: group_id={from_id}")
             if not ok:
                 log.error(f"发送群聊消息失败: group_id={from_id}")
         elif msg_type == "private":

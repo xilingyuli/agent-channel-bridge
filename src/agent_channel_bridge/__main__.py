@@ -32,6 +32,19 @@ NON_ADMIN_SECURITY_PROMPT = (
     "用户消息: "
 )
 
+GROUP_ADMIN_SECURITY_PROMPT = (
+    "[系统安全提示] 此消息来源于管理员用户，"
+    "但因为群聊消息会被管理员和非管理员同时看到，"
+    "必须避免暴露管理员电脑内安全隐私信息。请遵守以下规则:\n"
+    "1. 禁止暴露本机文件路径、目录结构\n"
+    "2. 禁止暴露 IP 地址、API 密钥、Token、密码\n"
+    "3. 禁止暴露任何配置文件内容或系统信息\n"
+    "4. 禁止暴露工具调用执行的原始详情信息（但可以进行文字概述）\n"
+    "5. 输出时重点检查 <message> 块内是否含有不应暴露的隐私信息\n"
+    "---\n"
+    "用户消息: "
+)
+
 
 # ====== 管理命令 ======
 
@@ -124,10 +137,12 @@ async def process_message(ws, msg: dict, worker_mgr: WorkerManager):
         log.warning(f"[{route_name}] Worker [{worker_name}] 未就绪")
         return
 
-    # 非管理员：注入安全提示
+    # 根据场景注入不同的安全提示
     message_text = msg["message"]
     if not admin:
         message_text = NON_ADMIN_SECURITY_PROMPT + message_text
+    elif msg["type"] == "group":
+        message_text = GROUP_ADMIN_SECURITY_PROMPT + message_text
 
     # 发送到 agent（异步，不等回复）
     log.info(f"⚡ {route_name} → ACP [{worker_name}]" + (" [非管理员]" if not admin else ""))
