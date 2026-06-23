@@ -66,12 +66,12 @@ def _build_message_segments(text: str) -> list:
                 segments.append({"type": "text", "data": {"text": clean[last_end:m.start()]}})
             segments.append({"type": "at", "data": {"qq": m.group(1)}})
             last_end = m.end()
-        if last_end < len(clean):
-            remaining = clean[last_end:].strip()
-            if remaining:
-                segments.append({"type": "text", "data": {"text": remaining[:2000]}})
-        if last_end == 0:
-            segments.append({"type": "text", "data": {"text": clean[:2000]}})
+    if last_end < len(clean):
+        remaining = clean[last_end:].strip()
+        if remaining:
+            segments.append({"type": "text", "data": {"text": remaining[:2000]}})
+    elif last_end == 0:
+        segments.append({"type": "text", "data": {"text": clean[:2000]}})
     for url in image_urls:
         if os.path.isfile(url):
             try:
