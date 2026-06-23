@@ -166,6 +166,28 @@ class AcpWorker:
             return "~" + filepath[len(home):]
         return filepath
 
+    @staticmethod
+    def _collect_tool_detail(update: dict) -> str:
+        """从 tool_call_update in_progress 事件中提取工具详情"""
+        kind = update.get("kind", "")
+        ri = update.get("rawInput", {})
+        if kind in ("read", "write", "edit"):
+            fp = ri.get("filePath") or ri.get("filepath") or ""
+            if not fp:
+                locs = update.get("locations", [])
+                fp = locs[0].get("path", "") if locs else ""
+            return fp if fp else ""
+        if kind == "fetch":
+            url = ri.get("url", "")
+            return url[:120] if url else ""
+        if kind in ("other", "search"):
+            q = ri.get("query", "")
+            return q[:120] if q else ""
+        if kind == "execute":
+            cmd = ri.get("command") or ri.get("description", "")
+            return cmd[:200] if cmd else ""
+        return ""
+
     def _load_runtime_config(self) -> dict:
         """从运行时配置文件中读取所有配置，文件不存在或异常时返回空 dict"""
         try:
@@ -474,41 +496,30 @@ class AcpWorker:
 
             elif update_type == "tool_call":
                 self._session_tool_running[sid] = True
-                kind = update.get("kind", "")
-                raw_title = update.get("title", "") or "工具"
-                if kind in ("read", "write", "edit"):
-                    locs = update.get("locations", [])
-                    path = locs[0].get("path", "") if locs else ""
-                    tool_name = f"{kind} {self._relpath(path)}" if path else raw_title
-                elif kind in ("other", "search") and "Search" in raw_title:
-                    tool_name = raw_title[:100]
-                elif kind in ("execute", "bash"):
-                    tool_name = "bash"
-                else:
-                    tool_name = raw_title
-                prefix = "收到～" if not self._session_progress_sent.get(sid) else ""
-                self._session_progress_sent[sid] = True
-                msg = f"{prefix}正在执行 {tool_name}..."
-                self._send_rate_limited(sid, "tool_call", msg)
 
             elif update_type == "tool_call_update":
-                if update.get("status", "") == "in_progress":
-                    self._session_tool_running[sid] = True
-                # bash 工具结果：按 show_bash_msg 模式动态控制
                 kind = update.get("kind", "")
                 st = update.get("status", "")
-                if kind == "execute" and st == "completed":
+                if st == "in_progress":
+                    self._session_tool_running[sid] = True
+                    detail = self._collect_tool_detail(update)
+                    if detail:
+                        prefix = "收到～" if not self._session_progress_sent.get(sid) else ""
+                        self._session_progress_sent[sid] = True
+                        tool_name = update.get("title", "") or kind
+                        self._send_rate_limited(sid, "tool_call", f"{prefix}正在执行 {tool_name} {detail}")
+                elif kind == "execute" and st == "completed":
                     cfg = self._session_runtime_config.get(sid, {})
                     mode = int(cfg.get("show_bash_msg", 0))
                     if mode == 1:
                         ri = update.get("rawInput", {})
                         msg = f"{kind} " + " ".join(ri.keys())
-                        self._send_rate_limited(sid, "tool_call_update_bash", msg)
+                        self._send_rate_limited(sid, "tool_call", msg)
                     elif mode == 2:
                         ri = update.get("rawInput", {})
                         lines = [f"{k}={v}" for k, v in ri.items()]
                         msg = "\n".join(lines)
-                        self._send_rate_limited(sid, "tool_call_update_bash", msg)
+                        self._send_rate_limited(sid, "tool_call", msg)
                     # mode 0: 不发
 
             elif update_type == "step_finish":
@@ -666,9 +677,11 @@ class AcpWorker:
         src = "群聊" if qq_msg and qq_msg.get("type") == "group" else "私聊"
         sender = qq_msg.get("sender_name", "用户") if qq_msg else "用户"
         user_id = qq_msg.get("user_id", "") if qq_msg else ""
+        is_admin = self._session_admin_private.get(sid, False)
         ctx_lines.append(f"你正在通过QQ和用户对话。来源: {src}，发送者: {sender}。")
+        ctx_lines.append(f"此次消息视作{'管理员' if is_admin else '非管理员'}消息。")
         if qq_msg and qq_msg.get("type") == "group" and user_id:
-            ctx_lines.append(f"⚠️ 重要：在群聊中回复时，第一行必须用 @用户QQ号 开头！否则用户收不到提示。")
+            ctx_lines.append(f"⚠️ 重要：在群聊中回复时，第一行必须用 @用户QQ号+空格 开头！否则用户收不到提示。")
             ctx_lines.append(f"   例如回复 \"@{user_id} 你好呀～\"")
 
         # 处理 CQ reply（引用消息）
@@ -726,7 +739,7 @@ class AcpWorker:
         ctx_lines.append("     第二条回复")
         ctx_lines.append("     </message>")
         ctx_lines.append("  2. 每条 <message> 输出后立即发送给用户，无需等待")
-        ctx_lines.append("  3. 群聊时每条 <message> 第一行必须 @用户QQ号")
+        ctx_lines.append("  3. 群聊时每条 <message> 第一行必须 @用户QQ号+空格")
         ctx_lines.append("  4. 思考过程、内部推理不要用 <message> 包裹，不会发给用户")
         ctx_lines.append("")
         ctx_lines.append("【发送图片/文件/语音 - 标签格式】")

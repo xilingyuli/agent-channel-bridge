@@ -130,6 +130,17 @@ async def send_chunked(msg_type: str, target_id: int, full_text: str):
 
 # ====== 回复回调（IO 链路独立）=====
 
+def _fix_group_at_spacing(text: str, target_user_id: str) -> str:
+    """群聊回复第一行以 @QQ号 开头但缺少空格时自动补上。"""
+    first_line = text.split("\n")[0]
+    prefix = f"@{target_user_id}"
+    if first_line.startswith(prefix):
+        rest = first_line[len(prefix):]
+        if rest and not rest.startswith(" "):
+            text = prefix + " " + text[len(prefix):]
+    return text
+
+
 async def on_worker_reply(worker_key: str, agent_name: str,
                           reply_text: str, qq_msg: dict):
     if not reply_text or not qq_msg:
@@ -141,6 +152,10 @@ async def on_worker_reply(worker_key: str, agent_name: str,
     user_id = int(qq_msg.get("user_id", 0))
     from_id = qq_msg.get("from_id", "")
     msg_type = qq_msg["type"]
+
+    # 群聊回复：自动补 @QQ号 后的空格
+    if msg_type == "group":
+        reply_text = _fix_group_at_spacing(reply_text, str(user_id))
 
     # 超长消息：缓存到本地，回复摘要
     if len(reply_text) > MAX_MSG_LEN:

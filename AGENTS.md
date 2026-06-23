@@ -1,5 +1,11 @@
 # AGENTS.md — Agent Channel Bridge 工作指南
 
+> 关于本机所有 QQ Bot 相关服务的完整介绍，见 [`SERVICES.md`](./SERVICES.md)。
+
+**速览：** NapCatQQ（Docker, port 3001）→ 同时服务 Miao-Yunzai（群管）和 Bridge（AI 路由）→ Bridge 通过 ACP 调用 OpenCode（子进程）。三个服务由 `~/Documents/Code/startmybot.sh` 一键启动。详情及约束见 `SERVICES.md`。
+
+---
+
 ## 📌 项目概览
 
 Agent Channel Bridge 是一个将 QQ 消息路由到 AI Coding Agent（OpenCode、Claude Code 等）的桥梁。它通过 ACP 协议（JSON-RPC over stdio）与 Agent 子进程通信，NapCat 作为 QQ 协议层。
@@ -26,8 +32,6 @@ agent-channel-bridge/
 │       ├── worker_manager.py   # Worker 生命周期管理
 │       ├── onebot.py           # OneBot v11 协议（消息构建/解析/API）
 │       └── rpc_log.py          # JSON-RPC 日志
-├── tests/
-│   └── test_bridge.py          # 单元测试（36 个用例，覆盖路由/消息/解析）
 └── CHANGELOG.md                # [可选] 变更日志
 ```
 
@@ -41,30 +45,9 @@ agent-channel-bridge/
 
 **必须遵守：**
 - ✅ **先写测试再写代码**（测试驱动）
-- ✅ **运行 `make test` 确保全部通过**（36 个用例）
-- ✅ **运行 `make lint`**（ruff + mypy）
 - ✅ **代码提交后签名并推送**（`config.yaml` 已 gitignored，注意检查）
 - ✅ **同步更新 README.md**（特别要检查：配置示例、路由规则、架构图）
 
-### 2. 测试规范
-
-所有测试在 `tests/test_bridge.py`，使用 `pytest`。
-
-**测试分类（参考现有测试）：**
-
-| 测试类 | 测试内容 | 新增时注意 |
-|--------|---------|-----------|
-| `test_import` / `test_version` | 基础导入 | 加新模块时更新 |
-| `TestRouteMatching` | 路由匹配逻辑 | 修改 `get_route()` 时必须覆盖：精确匹配、所有 8 种通配组合、优先级顺序、群聊@限制 |
-| `TestBuildMessageSegments` | 消息段构建 | 修改 `_build_message_segments()` 必须覆盖：所有标签类型、混合内容、空内容、截断、边界情况 |
-| `TestParseOnebot` | 协议解析 | 修改 `parse_onebot()` 必须覆盖：私聊/群聊、CQ at/文本 at、@剥离、空消息、发送者回退 |
-| `TestRpcLog` | RPC 日志 | 修改 `rpc_log.py` 时更新 |
-
-**运行测试：**
-```bash
-make test           # 常用
-python -m pytest tests/ -v --tb=short   # 详细输出
-```
 
 ### 3. 路由匹配规则（重要！）
 
@@ -150,7 +133,7 @@ system prompt 中的「进度同步约定」要求 Agent 在以下场景**必须
 | 消息格式/标签 | README「消息格式」+ Agent 系统提示模板（`_do_send_prompt`） |
 | 新增管理命令 | README「管理命令」表格 |
 | 项目结构变更 | README「项目结构」树形图 |
-| 添加新模块 | `tests/test_bridge.py` 的 `test_import` 增加导入验证 |
+
 
 ## ⚠️ 常见 Pitfalls
 
@@ -160,24 +143,6 @@ system prompt 中的「进度同步约定」要求 Agent 在以下场景**必须
 4. **`_ws_conn` 是模块级全局变量：** 在 `config.py` 中定义，`__main__.py` 和 `onebot.py` 共享引用，重连时会有窗口期
 5. **`_prompt_msg_map` 无超时清理：** 后台 prompt 如果不返回，map 会泄漏（潜在风险）
 6. **`auto_test()` 已移除：** 不要再添加自动测试消息，会消耗 API 额度
-
-## 🧪 测试辅助
-
-测试中路由匹配使用 `_inject_routes()` 和 `_reset_config()` 注⼊配置：
-
-```python
-def _inject_routes(my_routes):
-    import agent_channel_bridge.config as cfg
-    cfg.config["routes"] = my_routes
-```
-
-```python
-def _reset_config():
-    import agent_channel_bridge.config as cfg
-    cfg.config.clear()
-```
-
-测试 OneBot 解析使用 `_make_msg()` 辅助函数构建模拟消息体。
 
 ## 🤖 Claude Code 作为 Worker
 
