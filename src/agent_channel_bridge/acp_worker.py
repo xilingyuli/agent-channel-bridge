@@ -217,9 +217,11 @@ class AcpWorker:
             self._rate_limit_buf[key][sid] = b + ("\n" + msg) if b else msg
 
     def _cleanup_rate_limit(self, sid: str):
-        """清除指定 session 的频控缓存"""
+        """清空频控缓存，同时把积压未发的消息先发送出去"""
         for key in self._rate_limit_buf:
-            self._rate_limit_buf[key].pop(sid, None)
+            buf = self._rate_limit_buf[key].pop(sid, None)
+            if buf and buf.strip():
+                self._enqueue_reply_direct(buf.strip(), self._peek_qq_msg(sid))
         for key in self._rate_limit_last:
             self._rate_limit_last[key].pop(sid, None)
 
@@ -465,8 +467,9 @@ class AcpWorker:
                             log.info(f"[{self.agent_name}] 🏁 最终消息(兜底): {leftover[:60]}")
                             self._enqueue_reply(sid_from_map, leftover)
 
-                # prompt 完成后清空原始缓冲和 tool_call 频控缓冲，再弹出 qq_msg
+                # prompt 完成后先清空频控缓冲（工具进度消息），再发结论（独立消息）
                 if sid_from_map:
+                    self._cleanup_rate_limit(sid_from_map)
                     buf_was_empty = not self._session_raw_buf.get(sid_from_map, "").strip()
                     self._flush_raw_buf(sid_from_map)
                     # 兜底：raw buffer 空但子代理有输出时，发送子代理结果
@@ -475,7 +478,6 @@ class AcpWorker:
                         if task_out:
                             self._enqueue_reply_direct(task_out, self._peek_qq_msg(sid_from_map))
                     self._session_runtime_config.pop(sid_from_map, None)
-                    self._cleanup_rate_limit(sid_from_map)
                     self._pop_qq_msg(sid_from_map)
                     # 检查排队队列，处理下一条
                     await self._process_pending_queue(sid_from_map)
