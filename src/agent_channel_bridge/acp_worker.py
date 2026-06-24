@@ -53,6 +53,8 @@ class AcpWorker:
         self._runtime_config_path = os.path.join(work_dir, ".bridge_runtime.json")
         # sessionId → 当前 prompt 的运行时配置缓存（prompt 开始时读取一次）
         self._session_runtime_config: dict[str, dict] = {}
+        # sessionId → 管理员私聊时子代理/task 工具的输出积攒（raw buffer 空时兜底发送）
+        self._session_task_output: dict[str, str] = {}
         # sessionId → [(timestamp, qq_msg), ...]（FIFO 队列，每次 prompt 推入，回复时 peek，prompt 完成时 pop）
         self._pending_qq_msgs: dict[str, list[tuple[float, dict]]] = {}
         # 忙碌时排队的 prompt：(text, route_key, qq_msg)
@@ -465,7 +467,13 @@ class AcpWorker:
 
                 # prompt 完成后清空原始缓冲和 tool_call 频控缓冲，再弹出 qq_msg
                 if sid_from_map:
+                    buf_was_empty = not self._session_raw_buf.get(sid_from_map, "").strip()
                     self._flush_raw_buf(sid_from_map)
+                    # 兜底：raw buffer 空但子代理有输出时，发送子代理结果
+                    if buf_was_empty and self._session_admin_private.get(sid_from_map):
+                        task_out = self._session_task_output.pop(sid_from_map, "").strip()
+                        if task_out:
+                            self._enqueue_reply_direct(task_out, self._peek_qq_msg(sid_from_map))
                     self._session_runtime_config.pop(sid_from_map, None)
                     self._cleanup_rate_limit(sid_from_map)
                     self._pop_qq_msg(sid_from_map)
@@ -538,12 +546,23 @@ class AcpWorker:
                         msg = "\n".join(lines)
                         self._send_rate_limited(sid, "tool_call", msg)
                     # mode 0: 不发
+                elif st == "completed" and kind in ("task", "think", "other"):
+                    # 子代理/task 输出积攒，raw buffer 空时兜底发送
+                    result_text = ""
+                    raw_out = update.get("rawOutput", {})
+                    if isinstance(raw_out, dict) and raw_out.get("output", "").strip():
+                        result_text = raw_out["output"]
+                    if result_text.strip():
+                        self._session_task_output.setdefault(sid, "")
+                        self._session_task_output[sid] += result_text.strip() + "\n"
 
             elif update_type == "step_finish":
                 raw = (content.get("text", "") or content.get("reasoning", "") or "").strip()
                 if raw:
                     import re as _re
                     clean = _re.sub(r'</?message>', '', raw).strip()
+                    clean = _re.sub(r'<invoke>.*?</invoke>', '', clean, flags=_re.DOTALL).strip()
+                    clean = _re.sub(r'<tool_calls>.*?</tool_calls>', '', clean, flags=_re.DOTALL).strip()
                     if clean:
                         self._enqueue_reply_direct(clean, self._peek_qq_msg(sid))
                 self._flush_raw_buf(sid, message_only=True)
@@ -654,6 +673,7 @@ class AcpWorker:
             self._session_tool_running.pop(sid, None)
             self._session_progress_sent.pop(sid, None)
             self._session_admin_private.pop(sid, None)
+            self._session_task_output.pop(sid, None)
             self._session_runtime_config.pop(sid, None)
             self._cleanup_rate_limit(sid)
             self._session_raw_buf.pop(sid, None)
@@ -684,6 +704,7 @@ class AcpWorker:
         self._session_buf.pop(sid, None)  # 清除上一轮残留
         self._session_progress_sent.pop(sid, None)  # 重置进度消息标记
         self._session_raw_buf.pop(sid, None)  # 清除上一轮原始缓冲
+        self._session_task_output.pop(sid, None)  # 清除上一轮子代理输出
         self._session_admin_private[sid] = is_admin_private
         self._session_runtime_config[sid] = self._load_runtime_config()
 
@@ -789,6 +810,7 @@ class AcpWorker:
         ctx_lines.append("  2. 每条 <message> 输出后立即发送给用户，无需等待")
         ctx_lines.append("  3. ⚠️ 注意 <message> 标签的开闭状态，确保不嵌套、不遗漏闭合标签")
         ctx_lines.append("  4. 思考过程、内部推理不要用 <message> 包裹，不会发给用户")
+        ctx_lines.append("  5. Message 正文应当展示为适合在 QQ 端呈现的格式，避免使用 md 语法和表格格式，合理补充换行符")
         ctx_lines.append("")
         ctx_lines.append("【发送图片/文件/语音 - 标签格式】")
         ctx_lines.append("  1. 在 <message> 内的任意位置插入标签即可发送媒体：")
@@ -895,6 +917,7 @@ class AcpWorker:
             self._session_tool_running.pop(sid, None)
             self._session_progress_sent.pop(sid, None)
             self._session_admin_private.pop(sid, None)
+            self._session_task_output.pop(sid, None)
             self._session_runtime_config.pop(sid, None)
             self._session_raw_buf.pop(sid, None)
             self._pending_qq_msgs.pop(sid, None)
@@ -920,6 +943,7 @@ class AcpWorker:
             self._session_tool_running.pop(sid, None)
             self._session_progress_sent.pop(sid, None)
             self._session_admin_private.pop(sid, None)
+            self._session_task_output.pop(sid, None)
             self._session_runtime_config.pop(sid, None)
             self._cleanup_rate_limit(sid)
             self._session_raw_buf.pop(sid, None)
