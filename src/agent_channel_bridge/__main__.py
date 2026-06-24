@@ -22,6 +22,7 @@ def _build_non_admin_prompt() -> str:
     """根据 config.yaml 动态生成非管理员安全提示"""
     sec = cfg.config.get("security", {}).get("non_admin", {})
     read_list = sec.get("read_whitelist", [])
+    write_list = sec.get("write_whitelist", [])
     cmd_list = sec.get("cmd_whitelist", [])
     parts = [
         "[系统安全提示] 此消息来自非管理员用户。请遵守以下规则:",
@@ -34,9 +35,15 @@ def _build_non_admin_prompt() -> str:
     if read_list:
         paths = "\n    ".join(read_list)
         parts.append(f"  > 文件白名单（允许只读）：\n    {paths}")
+    if write_list:
+        paths = "\n    ".join(write_list)
+        parts.append(f"  > 文件白名单（允许写入）：\n    {paths}")
     if cmd_list:
         cmds = "\n    ".join(cmd_list)
         parts.append(f"  > 命令白名单（允许执行）：\n    {cmds}")
+        cmd_notice = sec.get("cmd_notice", "")
+        if cmd_notice:
+            parts.append(f"  > 命令白名单规则：{cmd_notice}")
     parts.extend([
         "6. 只提供通用知识问答，不涉及具体项目代码",
         "7. 如果用户询问的内容可能泄露隐私，请礼貌拒绝",
