@@ -519,11 +519,18 @@ class AcpWorker:
 
             elif update_type == "tool_call":
                 self._session_tool_running[sid] = True
+                kind = update.get("kind", "")
+                raw_title = update.get("title", "") or kind
+                # read/write/edit/fetch/search/execute 会在 in_progress 阶段发详情
+                # 这些类型在 tool_call 阶段不发，避免同一工具两次通知
+                if kind not in ("read", "write", "edit", "fetch", "other", "search", "execute"):
+                    prefix = "收到～" if not self._session_progress_sent.get(sid) else ""
+                    self._session_progress_sent[sid] = True
+                    self._send_rate_limited(sid, "tool_call", f"{prefix}正在执行 {raw_title}")
 
             elif update_type == "tool_call_update":
                 kind = update.get("kind", "")
                 st = update.get("status", "")
-                # 🔍 诊断日志：追踪外部文件工具的状态变化
                 if st in ("in_progress", "completed", "failed"):
                     log.info(f"[{self.agent_name}] 🔍 tool_call_update kind={kind} status={st}"
                              f" title={update.get('title','')[:40]}")
@@ -559,6 +566,7 @@ class AcpWorker:
                         self._session_task_output[sid] += result_text.strip() + "\n"
 
             elif update_type == "step_finish":
+                self._flush_raw_buf(sid, message_only=True)
                 raw = (content.get("text", "") or content.get("reasoning", "") or "").strip()
                 if raw:
                     import re as _re
@@ -567,7 +575,6 @@ class AcpWorker:
                     clean = _re.sub(r'<tool_calls>.*?</tool_calls>', '', clean, flags=_re.DOTALL).strip()
                     if clean:
                         self._enqueue_reply_direct(clean, self._peek_qq_msg(sid))
-                self._flush_raw_buf(sid, message_only=True)
 
             elif update_type == "agent_message_chunk":
                 if content.get("type") == "text":
@@ -812,6 +819,8 @@ class AcpWorker:
         ctx_lines.append("  2. 每条 <message> 输出后立即发送给用户，无需等待")
         ctx_lines.append("  3. ⚠️ 注意 <message> 标签的开闭状态，确保不嵌套、不遗漏闭合标签")
         ctx_lines.append("  4. 思考过程、内部推理不要用 <message> 包裹，不会发给用户")
+        ctx_lines.append("  5. read 的原始文件内容和 execute 的命令行输出不要放在 <message> 块内")
+        ctx_lines.append("  6. 仅允许使用 <message> 和 </message> 标签，禁止使用其他 XML/格式化标签")
         ctx_lines.append("  5. Message 正文应当展示为适合在 QQ 端呈现的格式，避免使用 md 语法和表格格式，合理补充换行符")
         ctx_lines.append("")
         ctx_lines.append("【发送图片/文件/语音 - 标签格式】")
