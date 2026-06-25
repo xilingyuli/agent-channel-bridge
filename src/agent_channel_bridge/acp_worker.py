@@ -154,6 +154,10 @@ class AcpWorker:
         raw = self._session_buf.pop(sid, "")
         if not raw.strip():
             return
+        # 没有 <message> 标签 → 可能是 thought/plan 残留（模型误放在 message_chunk 中），不发
+        if "<message>" not in raw and "</message>" not in raw:
+            log.info(f"[{self.agent_name}] 🏁 跳过非消息残留: {raw.strip()[:80]}")
+            return
         text = self._extract_msg_content(raw)
         if text:
             log.info(f"[{self.agent_name}] 📬 条: {text[:60]}")
