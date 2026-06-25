@@ -149,6 +149,47 @@ class AcpWorker:
                 self._enqueue_reply_direct(text, qq_msg)
         self._session_raw_buf[sid] = ""
 
+    def _flush_buf_message(self, sid: str):
+        """发送 _session_buf 积攒的内容（用 message_only=True 提取 <message> 块），用于普通模式"""
+        raw = self._session_buf.pop(sid, "")
+        if not raw.strip():
+            return
+        text = self._extract_msg_content(raw)
+        if text:
+            log.info(f"[{self.agent_name}] 📬 条: {text[:60]}")
+            self._enqueue_reply(sid, text)
+
+    def _handle_normal_mode_old(self, sid: str, update: dict, update_type: str, content: dict):
+        """旧的普通模式处理逻辑（保留供参考，当前未被调用）"""
+        if update_type == "tool_call":
+            self._session_tool_running[sid] = True
+        elif update_type == "tool_call_update":
+            if update.get("status", "") == "in_progress":
+                self._session_tool_running[sid] = True
+        elif update_type == "agent_message_chunk":
+            if content.get("type") == "text":
+                text = content.get("text", "")
+                clean = text
+                for ch in ["┃", "╹", "▣", "■", "▌", "▐", "▀", "▄", "░", "▒", "▓",
+                           "│", "║", "═", "╔", "╗", "╚", "╝", "╠", "╣", "╦", "╩", "╬"]:
+                    clean = clean.replace(ch, "")
+                if clean.strip():
+                    self._session_buf.setdefault(sid, "")
+                    self._session_buf[sid] += clean
+                    if "</message>" in self._session_buf[sid]:
+                        import re as _re
+                        full = self._session_buf.pop(sid, "")
+                        msgs = _re.findall(r'<message>(.*?)</message>', full, _re.DOTALL)
+                        for mtext in msgs:
+                            mtext = mtext.strip()
+                            if not mtext:
+                                continue
+                            mtext = _re.sub(r'</?message>', '', mtext).strip()
+                            if not mtext:
+                                continue
+                            log.info(f"[{self.agent_name}] 📬 条: {mtext[:60]}")
+                            self._enqueue_reply(sid, mtext)
+
     @staticmethod
     def _extract_msg_content(raw: str) -> str:
         """只提取 <message> 块内文本。缺标签时兜底全返回。"""
@@ -612,8 +653,12 @@ class AcpWorker:
                         self._session_raw_buf[sid] += clean
 
         else:
-            # ====== 普通模式（非管理员 + 群聊）======
-            if update_type == "tool_call":
+            # ====== 普通模式（新版）======
+            if update_type == "agent_thought_chunk":
+                self._flush_buf_message(sid)
+
+            elif update_type == "tool_call":
+                self._flush_buf_message(sid)
                 self._session_tool_running[sid] = True
 
             elif update_type == "tool_call_update":
@@ -628,22 +673,15 @@ class AcpWorker:
                                "│", "║", "═", "╔", "╗", "╚", "╝", "╠", "╣", "╦", "╩", "╬"]:
                         clean = clean.replace(ch, "")
                     if clean.strip():
+                        # messageId 变化 → 新消息开始，flush 前一条
+                        curr_mid = content.get("messageId", "") or ""
+                        last_mid = self._session_last_message_id.get(sid, "")
+                        if curr_mid and curr_mid != last_mid and last_mid:
+                            self._flush_buf_message(sid)
+                        if curr_mid:
+                            self._session_last_message_id[sid] = curr_mid
                         self._session_buf.setdefault(sid, "")
                         self._session_buf[sid] += clean
-
-                        if "</message>" in self._session_buf[sid]:
-                            full = self._session_buf.pop(sid, "")
-                            import re as _re
-                            msgs = _re.findall(r'<message>(.*?)</message>', full, _re.DOTALL)
-                            for mtext in msgs:
-                                mtext = mtext.strip()
-                                if not mtext:
-                                    continue
-                                mtext = _re.sub(r'</?message>', '', mtext).strip()
-                                if not mtext:
-                                    continue
-                                log.info(f"[{self.agent_name}] 📬 条: {mtext[:60]}")
-                                self._enqueue_reply(sid, mtext)
 
     async def send_message(self, text: str, qq_msg: dict = None):
         """发送消息到 agent，立即返回，不等待回复"""
