@@ -108,24 +108,41 @@ class AcpWorker:
         self._clean_stale_qq_msgs(sid)
         return result
 
+    def _split_at_goal_heading(self, text: str) -> list[str]:
+        """如果文本包含 ## Goal 开头行（OpenCode 重放的旧会话总结），在第一个 ## Goal 前截断为两条消息"""
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            if i > 0 and line.startswith("## Goal"):
+                before = "\n".join(lines[:i]).strip()
+                after = "\n".join(lines[i:]).strip()
+                if before and after:
+                    log.info(f"📎 检测到 ## Goal 标题行(第{i+1}行)，拆分为两条消息发送")
+                    return [before, after]
+                break
+        return [text]
+
     def _enqueue_reply(self, sid: str, text: str):
         """从 session 队列 peek qq_msg，将回复推入统一发送队列"""
-        qq_msg = self._peek_qq_msg(sid)
-        if qq_msg and text.strip():
-            self._reply_seq += 1
-            seq = self._reply_seq
-            qsize = self._reply_queue.qsize()
-            log.info(f"[{self.agent_name}] 📥 入队 #{seq} (队列{qsize}) [{sid[:12]}...]: {text[:40]}")
-            self._reply_queue.put_nowait((self.name, self.agent_name, text, qq_msg, seq))
+        parts = self._split_at_goal_heading(text.strip())
+        for part in parts:
+            qq_msg = self._peek_qq_msg(sid)
+            if qq_msg and part.strip():
+                self._reply_seq += 1
+                seq = self._reply_seq
+                qsize = self._reply_queue.qsize()
+                log.info(f"[{self.agent_name}] 📥 入队 #{seq} (队列{qsize}) [{sid[:12]}...]: {part[:40]}")
+                self._reply_queue.put_nowait((self.name, self.agent_name, part, qq_msg, seq))
 
     def _enqueue_reply_direct(self, text: str, qq_msg: dict):
         """直接用给定的 qq_msg 推入统一发送队列（用于忙碌回复等场景）"""
-        if qq_msg and text.strip():
-            self._reply_seq += 1
-            seq = self._reply_seq
-            qsize = self._reply_queue.qsize()
-            log.info(f"[{self.agent_name}] 📥 入队 #{seq} (队列{qsize}): {text[:40]}")
-            self._reply_queue.put_nowait((self.name, self.agent_name, text, qq_msg, seq))
+        parts = self._split_at_goal_heading(text.strip())
+        for part in parts:
+            if qq_msg and part.strip():
+                self._reply_seq += 1
+                seq = self._reply_seq
+                qsize = self._reply_queue.qsize()
+                log.info(f"[{self.agent_name}] 📥 入队 #{seq} (队列{qsize}): {part[:40]}")
+                self._reply_queue.put_nowait((self.name, self.agent_name, part, qq_msg, seq))
 
     def _flush_raw_buf(self, sid: str, message_only: bool = False):
         """发送 _session_raw_buf 积攒的内容。
@@ -883,7 +900,12 @@ class AcpWorker:
             ctx_lines.append("  3. 正文应当展示为适合在 QQ 端呈现的纯文本格式。禁止使用任何 markdown/XML 语法和表格格式，合理补充换行符。如下示例：")
             ctx_lines.append("     错误：**重要提醒** <b>加粗</b> - 项目1 - 项目2 - `代码`")
             ctx_lines.append("     正确：重要提醒 加粗 项目1 项目2 代码")
-            ctx_lines.append("     即在 QQ 纯文本中，用空格和换行替代所有格式符号")
+            ctx_lines.append("     常见 markdown 块级结构也必须替换为纯文本换行：")
+            ctx_lines.append("       · 标题 # xxx → 无前缀，前面加空行，后面加换行")
+            ctx_lines.append("       · 列表 - xxx 或 1. xxx → 去掉前缀，每条独立一行")
+            ctx_lines.append("       · 分割线 --- 或 *** → 替换为全空行（至少两个换行）")
+            ctx_lines.append("       · 不同段落/主题之间用空行分隔，不要用 --- 等标记")
+            ctx_lines.append("     即在 QQ 纯文本中，只用空格和换行组织内容，零 markdown 标记")
         else:
             ctx_lines.append("【回复规则】")
             ctx_lines.append("  1. 每条独立回复用 <message> 包裹，支持一次输出多条：")
@@ -900,7 +922,12 @@ class AcpWorker:
             ctx_lines.append("  6. 正文应当展示为适合在 QQ 端呈现的纯文本格式。禁止使用任何 markdown/XML 语法和表格格式，合理补充换行符。如下示例：")
             ctx_lines.append("     错误：**重要提醒** <b>加粗</b> - 项目1 - 项目2 - `代码`")
             ctx_lines.append("     正确：重要提醒 加粗 项目1 项目2 代码")
-            ctx_lines.append("     即在 QQ 纯文本中，用空格和换行替代所有格式符号")
+            ctx_lines.append("     常见 markdown 块级结构也必须替换为纯文本换行：")
+            ctx_lines.append("       · 标题 # xxx → 无前缀，前面加空行，后面加换行")
+            ctx_lines.append("       · 列表 - xxx 或 1. xxx → 去掉前缀，每条独立一行")
+            ctx_lines.append("       · 分割线 --- 或 *** → 替换为全空行（至少两个换行）")
+            ctx_lines.append("       · 不同段落/主题之间用空行分隔，不要用 --- 等标记")
+            ctx_lines.append("     即在 QQ 纯文本中，只用空格和换行组织内容，零 markdown 标记")
         ctx_lines.append("")
         ctx_lines.append("【发送图片/文件/语音 - 标签格式】")
         ctx_lines.append("  1. 在 <message> 内的任意位置插入标签即可发送媒体：")

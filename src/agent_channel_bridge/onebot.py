@@ -199,8 +199,6 @@ async def on_worker_reply(worker_key: str, agent_name: str,
             ok = await send_group_msg(int(from_id), reply_text, str(user_id))
             if not ok:
                 log.error(f"发送群聊消息失败: group_id={from_id}")
-            if not ok:
-                log.error(f"发送群聊消息失败: group_id={from_id}")
         elif msg_type == "private":
             if not user_id or user_id == 0:
                 log.warning(f"跳过测试私聊: user_id={qq_msg.get('user_id')}")
