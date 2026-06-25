@@ -55,6 +55,8 @@ class AcpWorker:
         self._session_runtime_config: dict[str, dict] = {}
         # sessionId → 管理员私聊时子代理/task 工具的输出积攒（raw buffer 空时兜底发送）
         self._session_task_output: dict[str, str] = {}
+        # sessionId → 上一条 agent_message_chunk 的 messageId（用于检测新消息边界）
+        self._session_last_message_id: dict[str, str] = {}
         # sessionId → [(timestamp, qq_msg), ...]（FIFO 队列，每次 prompt 推入，回复时 peek，prompt 完成时 pop）
         self._pending_qq_msgs: dict[str, list[tuple[float, dict]]] = {}
         # 忙碌时排队的 prompt：(text, route_key, qq_msg)
@@ -127,8 +129,8 @@ class AcpWorker:
 
     def _flush_raw_buf(self, sid: str, message_only: bool = False):
         """发送 _session_raw_buf 积攒的内容。
-        message_only=True: 只取 <message> 块内文本（缺头尾时兜底）
-        message_only=False: 去标签后全量发送"""
+        message_only=True: 只取 <message> 块内文本（缺头尾时兜底），给普通模式用
+        message_only=False: 去首尾 message 标签后发送原始文本（管理员私聊模式）"""
         if not self._session_admin_private.get(sid):
             return
         raw = self._session_raw_buf.get(sid, "")
@@ -138,7 +140,9 @@ class AcpWorker:
         if message_only:
             text = self._extract_msg_content(raw)
         else:
-            text = _re.sub(r'</?message>', '', raw).strip()
+            text = raw.strip()
+            text = _re.sub(r'^<message>\s*', '', text)
+            text = _re.sub(r'\s*</\s*message>\s*$', '', text)
         if text:
             qq_msg = self._peek_qq_msg(sid)
             if qq_msg:
@@ -386,7 +390,7 @@ class AcpWorker:
             log.info(f"[{self.agent_name}] 📩 RPC id={msg['id']} keys={list(msg.keys())} {'result' in msg} has_stopReason={'stopReason' in msg.get('result',{})}")
         elif msg.get("method") == "session/update":
             ut = msg.get("params", {}).get("update", {}).get("sessionUpdate", "")
-            if ut in ("agent_message_chunk", "step_finish", "tool_call_start"):
+            if ut in ("agent_message_chunk", "tool_call_start"):
                 log.info(f"[{self.agent_name}] 📩 UPDATE type={ut}")
 
         # request_permission — 优先处理，自动允许（无头模式）
@@ -464,12 +468,22 @@ class AcpWorker:
                                 log.info(f"[{self.agent_name}] 🏁 最终消息(标签): {mtext[:60]}")
                                 self._enqueue_reply(sid_from_map, mtext)
                         else:
-                            log.info(f"[{self.agent_name}] 🏁 最终消息(兜底): {leftover[:60]}")
-                            self._enqueue_reply(sid_from_map, leftover)
+                            # 无闭合标签：尝试提取 <message> 后的内容
+                            idx = leftover.find("<message>")
+                            if idx >= 0:
+                                after = leftover[idx + len("<message>"):].strip()
+                                if after:
+                                    log.info(f"[{self.agent_name}] 🏁 最终消息(缺闭合): {after[:60]}")
+                                    self._enqueue_reply(sid_from_map, after)
+                            else:
+                                # 没有 <message> 标签 → 可能是 thought 残留，不发
+                                log.info(f"[{self.agent_name}] 🏁 跳过非消息残留: {leftover[:80]}")
 
                 # prompt 完成后先清空频控缓冲（工具进度消息），再发结论（独立消息）
                 if sid_from_map:
                     self._cleanup_rate_limit(sid_from_map)
+                    if self._session_admin_private.get(sid_from_map):
+                        self._enqueue_reply_direct("任务执行完成：", self._peek_qq_msg(sid_from_map))
                     buf_was_empty = not self._session_raw_buf.get(sid_from_map, "").strip()
                     self._flush_raw_buf(sid_from_map)
                     # 兜底：raw buffer 空但子代理有输出时，发送子代理结果
@@ -513,20 +527,32 @@ class AcpWorker:
         if is_admin:
             # ====== 管理员私聊模式 ======
             if update_type == "agent_thought_chunk":
+                # 新 thought → flush 积压的 message 输出
+                self._flush_raw_buf(sid)
+                # 日志记录 thought 内容（不发送给用户）
+                thought_text = content.get("text", "") or content.get("reasoning", "") or ""
+                if thought_text.strip():
+                    log.info(f"[{self.agent_name}] 💭 thought [{sid[:12]}]: {thought_text[:300]}")
                 if not self._session_progress_sent.get(sid):
                     self._session_progress_sent[sid] = True
                     self._enqueue_reply_direct("思考中……", self._peek_qq_msg(sid))
 
             elif update_type == "tool_call":
+                # 新 tool_call → flush 积压的 message 输出
+                self._flush_raw_buf(sid)
                 self._session_tool_running[sid] = True
                 kind = update.get("kind", "")
                 raw_title = update.get("title", "") or kind
-                # read/write/edit/fetch/search/execute 会在 in_progress 阶段发详情
-                # 这些类型在 tool_call 阶段不发，避免同一工具两次通知
-                if kind not in ("read", "write", "edit", "fetch", "other", "search", "execute"):
+                # read/write/edit/fetch/search/other 在 in_progress 阶段发详情
+                # execute 在 tool_call 阶段就发（含命令详情），in_progress 不再发
+                if kind not in ("read", "write", "edit", "fetch", "other", "search"):
                     prefix = "收到～" if not self._session_progress_sent.get(sid) else ""
                     self._session_progress_sent[sid] = True
-                    self._send_rate_limited(sid, "tool_call", f"{prefix}正在执行 {raw_title}")
+                    if kind == "execute":
+                        detail = self._collect_tool_detail(update)
+                        self._send_rate_limited(sid, "tool_call", f"{prefix}正在执行 {raw_title} {detail}" if detail else f"{prefix}正在执行 {raw_title}")
+                    else:
+                        self._send_rate_limited(sid, "tool_call", f"{prefix}正在执行 {raw_title}")
 
             elif update_type == "tool_call_update":
                 kind = update.get("kind", "")
@@ -536,12 +562,14 @@ class AcpWorker:
                              f" title={update.get('title','')[:40]}")
                 if st == "in_progress":
                     self._session_tool_running[sid] = True
-                    detail = self._collect_tool_detail(update)
-                    if detail:
-                        prefix = "收到～" if not self._session_progress_sent.get(sid) else ""
-                        self._session_progress_sent[sid] = True
-                        tool_name = update.get("title", "") or kind
-                        self._send_rate_limited(sid, "tool_call", f"{prefix}正在执行 {tool_name} {detail}")
+                    # execute 已在 tool_call 阶段发消息，此处跳过
+                    if kind != "execute":
+                        detail = self._collect_tool_detail(update)
+                        if detail:
+                            prefix = "收到～" if not self._session_progress_sent.get(sid) else ""
+                            self._session_progress_sent[sid] = True
+                            tool_name = update.get("title", "") or kind
+                            self._send_rate_limited(sid, "tool_call", f"{prefix}正在执行 {tool_name} {detail}")
                 elif kind == "execute" and st == "completed":
                     cfg = self._session_runtime_config.get(sid, {})
                     mode = int(cfg.get("show_bash_msg", 0))
@@ -565,17 +593,6 @@ class AcpWorker:
                         self._session_task_output.setdefault(sid, "")
                         self._session_task_output[sid] += result_text.strip() + "\n"
 
-            elif update_type == "step_finish":
-                self._flush_raw_buf(sid, message_only=True)
-                raw = (content.get("text", "") or content.get("reasoning", "") or "").strip()
-                if raw:
-                    import re as _re
-                    clean = _re.sub(r'</?message>', '', raw).strip()
-                    clean = _re.sub(r'<invoke>.*?</invoke>', '', clean, flags=_re.DOTALL).strip()
-                    clean = _re.sub(r'<tool_calls>.*?</tool_calls>', '', clean, flags=_re.DOTALL).strip()
-                    if clean:
-                        self._enqueue_reply_direct(clean, self._peek_qq_msg(sid))
-
             elif update_type == "agent_message_chunk":
                 if content.get("type") == "text":
                     text = content.get("text", "")
@@ -584,6 +601,13 @@ class AcpWorker:
                                "│", "║", "═", "╔", "╗", "╚", "╝", "╠", "╣", "╦", "╩", "╬"]:
                         clean = clean.replace(ch, "")
                     if clean.strip():
+                        # messageId 变化 → 新消息开始，flush 前一条
+                        curr_mid = content.get("messageId", "") or ""
+                        last_mid = self._session_last_message_id.get(sid, "")
+                        if curr_mid and curr_mid != last_mid and last_mid:
+                            self._flush_raw_buf(sid)
+                        if curr_mid:
+                            self._session_last_message_id[sid] = curr_mid
                         self._session_raw_buf.setdefault(sid, "")
                         self._session_raw_buf[sid] += clean
 
@@ -684,6 +708,7 @@ class AcpWorker:
             self._session_admin_private.pop(sid, None)
             self._session_task_output.pop(sid, None)
             self._session_runtime_config.pop(sid, None)
+            self._session_last_message_id.pop(sid, None)
             self._cleanup_rate_limit(sid)
             self._session_raw_buf.pop(sid, None)
             self._session_buf.pop(sid, None)
@@ -713,6 +738,7 @@ class AcpWorker:
         self._session_buf.pop(sid, None)  # 清除上一轮残留
         self._session_progress_sent.pop(sid, None)  # 重置进度消息标记
         self._session_raw_buf.pop(sid, None)  # 清除上一轮原始缓冲
+        self._session_last_message_id.pop(sid, None)  # 清除上一条 messageId
         self._session_task_output.pop(sid, None)  # 清除上一轮子代理输出
         self._session_admin_private[sid] = is_admin_private
         self._session_runtime_config[sid] = self._load_runtime_config()
@@ -808,22 +834,31 @@ class AcpWorker:
 
         # 特殊格式指令
         ctx_lines.append("")
-        ctx_lines.append("【回复规则】")
-        ctx_lines.append("  1. 每条独立回复用 <message> 包裹，支持一次输出多条：")
-        ctx_lines.append("     <message>")
-        ctx_lines.append("     第一条回复")
-        ctx_lines.append("     </message>")
-        ctx_lines.append("     <message>")
-        ctx_lines.append("     第二条回复")
-        ctx_lines.append("     </message>")
-        ctx_lines.append("  2. 仅允许使用 <message> 和 </message> 标签，禁止使用其他格式的 message 标签")
-        ctx_lines.append("  3. 每条 <message> 输出后立即发送给用户，无需等待")
-        ctx_lines.append("  4. 注意 <message> 标签的开闭状态，确保不嵌套、不遗漏闭合标签")
-        ctx_lines.append("  5. 思考过程、内部推理以及 read 的原始内容、execute 的命令输出不要放在 <message> 块内发给用户")
-        ctx_lines.append("  6. 正文应当展示为适合在 QQ 端呈现的纯文本格式。禁止使用任何 markdown/XML 语法和表格格式，合理补充换行符。如下示例：")
-        ctx_lines.append("     错误：**重要提醒** <b>加粗</b> - 项目1 - 项目2 - `代码`")
-        ctx_lines.append("     正确：重要提醒 加粗 项目1 项目2 代码")
-        ctx_lines.append("     即在 QQ 纯文本中，用空格和换行替代所有格式符号")
+        if is_admin:
+            ctx_lines.append("【回复规则】")
+            ctx_lines.append("  1. 正文直接输出，无需用 XML/标签包裹")
+            ctx_lines.append("  2. 思考过程、内部推理以及 read/execute 等工具执行结果不要输出给用户")
+            ctx_lines.append("  3. 正文应当展示为适合在 QQ 端呈现的纯文本格式。禁止使用任何 markdown/XML 语法和表格格式，合理补充换行符。如下示例：")
+            ctx_lines.append("     错误：**重要提醒** <b>加粗</b> - 项目1 - 项目2 - `代码`")
+            ctx_lines.append("     正确：重要提醒 加粗 项目1 项目2 代码")
+            ctx_lines.append("     即在 QQ 纯文本中，用空格和换行替代所有格式符号")
+        else:
+            ctx_lines.append("【回复规则】")
+            ctx_lines.append("  1. 每条独立回复用 <message> 包裹，支持一次输出多条：")
+            ctx_lines.append("     <message>")
+            ctx_lines.append("     第一条回复")
+            ctx_lines.append("     </message>")
+            ctx_lines.append("     <message>")
+            ctx_lines.append("     第二条回复")
+            ctx_lines.append("     </message>")
+            ctx_lines.append("  2. 仅允许使用 <message> 和 </message> 标签，禁止使用其他格式的 message 标签")
+            ctx_lines.append("  3. 每条 <message> 输出后立即发送给用户，无需等待")
+            ctx_lines.append("  4. 注意 <message> 标签的开闭状态，确保不嵌套、不遗漏闭合标签")
+            ctx_lines.append("  5. 思考过程、内部推理以及 read 的原始内容、execute 的命令输出不要放在 <message> 块内发给用户")
+            ctx_lines.append("  6. 正文应当展示为适合在 QQ 端呈现的纯文本格式。禁止使用任何 markdown/XML 语法和表格格式，合理补充换行符。如下示例：")
+            ctx_lines.append("     错误：**重要提醒** <b>加粗</b> - 项目1 - 项目2 - `代码`")
+            ctx_lines.append("     正确：重要提醒 加粗 项目1 项目2 代码")
+            ctx_lines.append("     即在 QQ 纯文本中，用空格和换行替代所有格式符号")
         ctx_lines.append("")
         ctx_lines.append("【发送图片/文件/语音 - 标签格式】")
         ctx_lines.append("  1. 在 <message> 内的任意位置插入标签即可发送媒体：")
@@ -932,6 +967,7 @@ class AcpWorker:
             self._session_admin_private.pop(sid, None)
             self._session_task_output.pop(sid, None)
             self._session_runtime_config.pop(sid, None)
+            self._session_last_message_id.pop(sid, None)
             self._session_raw_buf.pop(sid, None)
             self._pending_qq_msgs.pop(sid, None)
         self._prompt_msg_map.clear()
@@ -958,6 +994,7 @@ class AcpWorker:
             self._session_admin_private.pop(sid, None)
             self._session_task_output.pop(sid, None)
             self._session_runtime_config.pop(sid, None)
+            self._session_last_message_id.pop(sid, None)
             self._cleanup_rate_limit(sid)
             self._session_raw_buf.pop(sid, None)
             self._pending_qq_msgs.pop(sid, None)
