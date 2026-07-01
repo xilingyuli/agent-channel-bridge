@@ -28,7 +28,7 @@ cmd_start() {
 
     local logf=$(logfile)
     echo "🚀 启动 Bridge..."
-    PYTHONUNBUFFERED=1 nohup "${BRIDGE_DIR}/.venv/bin/python" -m agent_channel_bridge > "$logf" 2>&1 &
+    OPENCODE_ENABLE_EXA=1 PYTHONUNBUFFERED=1 nohup "${BRIDGE_DIR}/.venv/bin/python" -m agent_channel_bridge > "$logf" 2>&1 &
     local pid=$!
     echo "$pid" > "$pidf"
 

@@ -662,7 +662,9 @@ class AcpWorker:
                     for ch in ["┃", "╹", "▣", "■", "▌", "▐", "▀", "▄", "░", "▒", "▓",
                                "│", "║", "═", "╔", "╗", "╚", "╝", "╠", "╣", "╦", "╩", "╬"]:
                         clean = clean.replace(ch, "")
-                    if clean.strip():
+                    # 保留空行 chunk（\n\n），只跳过真正的空字符串
+                    # clean.strip() 会丢弃 \n\n 使格式丢失，改用 if clean
+                    if clean:
                         # messageId 变化 → 新消息开始，flush 前一条
                         curr_mid = content.get("messageId", "") or ""
                         last_mid = self._session_last_message_id.get(sid, "")
@@ -693,7 +695,7 @@ class AcpWorker:
                     for ch in ["┃", "╹", "▣", "■", "▌", "▐", "▀", "▄", "░", "▒", "▓",
                                "│", "║", "═", "╔", "╗", "╚", "╝", "╠", "╣", "╦", "╩", "╬"]:
                         clean = clean.replace(ch, "")
-                    if clean.strip():
+                    if clean:
                         # messageId 变化 → 新消息开始，flush 前一条
                         curr_mid = content.get("messageId", "") or ""
                         last_mid = self._session_last_message_id.get(sid, "")
@@ -897,15 +899,7 @@ class AcpWorker:
             ctx_lines.append("【回复规则】")
             ctx_lines.append("  1. 正文直接输出，无需用 XML/标签包裹")
             ctx_lines.append("  2. 思考过程、内部推理以及 read/execute 等工具执行结果不要输出给用户")
-            ctx_lines.append("  3. 正文应当展示为适合在 QQ 端呈现的纯文本格式。禁止使用任何 markdown/XML 语法和表格格式，合理补充换行符。如下示例：")
-            ctx_lines.append("     错误：**重要提醒** <b>加粗</b> - 项目1 - 项目2 - `代码`")
-            ctx_lines.append("     正确：重要提醒 加粗 项目1 项目2 代码")
-            ctx_lines.append("     常见 markdown 块级结构也必须替换为纯文本换行：")
-            ctx_lines.append("       · 标题 # xxx → 无前缀，前面加空行，后面加换行")
-            ctx_lines.append("       · 列表 - xxx 或 1. xxx → 去掉前缀，每条独立一行")
-            ctx_lines.append("       · 分割线 --- 或 *** → 替换为全空行（至少两个换行）")
-            ctx_lines.append("       · 不同段落/主题之间用空行分隔，不要用 --- 等标记")
-            ctx_lines.append("     即在 QQ 纯文本中，只用空格和换行组织内容，零 markdown 标记")
+            ctx_lines.append("  3. 正文应当展示为适合在 QQ 端呈现的纯文本格式。禁止使用 markdown/XML 语法和表格格式。")
         else:
             ctx_lines.append("【回复规则】")
             ctx_lines.append("  1. 每条独立回复用 <message> 包裹，支持一次输出多条：")
@@ -919,15 +913,7 @@ class AcpWorker:
             ctx_lines.append("  3. 每条 <message> 输出后立即发送给用户，无需等待")
             ctx_lines.append("  4. 注意 <message> 标签的开闭状态，确保不嵌套、不遗漏闭合标签")
             ctx_lines.append("  5. 思考过程、内部推理以及 read 的原始内容、execute 的命令输出不要放在 <message> 块内发给用户")
-            ctx_lines.append("  6. 正文应当展示为适合在 QQ 端呈现的纯文本格式。禁止使用任何 markdown/XML 语法和表格格式，合理补充换行符。如下示例：")
-            ctx_lines.append("     错误：**重要提醒** <b>加粗</b> - 项目1 - 项目2 - `代码`")
-            ctx_lines.append("     正确：重要提醒 加粗 项目1 项目2 代码")
-            ctx_lines.append("     常见 markdown 块级结构也必须替换为纯文本换行：")
-            ctx_lines.append("       · 标题 # xxx → 无前缀，前面加空行，后面加换行")
-            ctx_lines.append("       · 列表 - xxx 或 1. xxx → 去掉前缀，每条独立一行")
-            ctx_lines.append("       · 分割线 --- 或 *** → 替换为全空行（至少两个换行）")
-            ctx_lines.append("       · 不同段落/主题之间用空行分隔，不要用 --- 等标记")
-            ctx_lines.append("     即在 QQ 纯文本中，只用空格和换行组织内容，零 markdown 标记")
+            ctx_lines.append("  6. 正文应当展示为适合在 QQ 端呈现的纯文本格式。禁止使用 markdown/XML 语法和表格格式。")
         ctx_lines.append("")
         ctx_lines.append("【发送图片/文件/语音 - 标签格式】")
         ctx_lines.append("  1. 在 <message> 内的任意位置插入标签即可发送媒体：")
