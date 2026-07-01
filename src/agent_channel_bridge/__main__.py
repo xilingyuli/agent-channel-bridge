@@ -130,17 +130,16 @@ async def process_message(ws, msg: dict, worker_mgr: WorkerManager):
                 await send_private_msg(int(msg["user_id"]), text)
         return
 
-    admin = is_admin(msg)
+    # 固定命令（最高优先级，无需 admin 校验）
+    reply = await handle_admin_cmd(msg, worker_mgr)
+    if reply:
+        if msg["type"] == "group":
+            await send_group_msg(int(msg["from_id"]), reply)
+        else:
+            await send_private_msg(int(msg["user_id"]), reply)
+        return
 
-    # 管理命令
-    if admin:
-        reply = await handle_admin_cmd(msg, worker_mgr)
-        if reply:
-            if msg["type"] == "group":
-                await send_group_msg(int(msg["from_id"]), reply)
-            else:
-                await send_private_msg(int(msg["user_id"]), reply)
-            return
+    admin = is_admin(msg)
 
     # 路由匹配
     route = get_route(msg["from_id"], msg["type"] == "private",
