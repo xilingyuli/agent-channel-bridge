@@ -71,6 +71,15 @@ class AcpWorker:
         self._reply_seq = 0  # 回复消息序号，用于追踪入队/出队配对
         # session 持久化路径
         self._session_file = os.path.join(work_dir, ".bridge_sessions.json")
+        self._history_file = os.path.join(work_dir, ".bridge_session_history.json")
+        # route_key → [session_id, ...] 历史会话（越新越靠前）
+        self._session_history: dict[str, list[str]] = {}
+        try:
+            if os.path.isfile(self._history_file):
+                with open(self._history_file) as f:
+                    self._session_history = json.load(f)
+        except Exception:
+            pass
 
     def _save_sessions(self):
         """保存 session 映射到文件"""
@@ -81,6 +90,19 @@ class AcpWorker:
                 _json.dump(data, f, ensure_ascii=False)
         except Exception as e:
             log.warning(f"[{self.agent_name}] session 持久化写入失败: {e}")
+
+    def _save_session_history(self):
+        """保存 session 历史到文件"""
+        import json as _json
+        try:
+            with open(self._history_file, "w") as f:
+                _json.dump(self._session_history, f, ensure_ascii=False)
+        except Exception as e:
+            log.warning(f"[{self.agent_name}] session history 持久化写入失败: {e}")
+
+    def list_session_history(self, route_key: str) -> list[str]:
+        """列出指定 route_key 的历史 session ID"""
+        return self._session_history.get(route_key, [])
 
     # -------- 统一回复收口 --------
 
@@ -1033,36 +1055,62 @@ class AcpWorker:
         log.info(f"[{self.agent_name}] 🧹 已重置 {closed} 个 session{'，' + str(errors) + ' 个失败' if errors else ''}")
         return {"closed": closed, "errors": errors}
 
-    async def reset_route_session(self, route_key: str) -> bool:
-        """关闭指定 route_key 的 session"""
-        sid = self._route_sessions.pop(route_key, None)
-        if not sid:
-            return False
-        try:
-            await self._send_request("session/close", {
-                "sessionId": sid,
-            })
-            self._session_buf.pop(sid, None)
-            self._session_last_activity.pop(sid, None)
-            self._session_tool_running.pop(sid, None)
-            self._session_progress_sent.pop(sid, None)
-            self._session_admin_private.pop(sid, None)
-            self._session_task_output.pop(sid, None)
-            self._session_runtime_config.pop(sid, None)
-            self._session_last_message_id.pop(sid, None)
-            self._cleanup_rate_limit(sid)
-            self._session_raw_buf.pop(sid, None)
-            self._pending_qq_msgs.pop(sid, None)
-            self._pending_prompts.pop(sid, None)
+    async def reset_route_session(self, route_key: str) -> tuple[bool, str]:
+        """关闭指定 route_key 的 session 并创建新 session，返回 (成功与否, 新session_id)"""
+        old_sid = self._route_sessions.pop(route_key, None)
+        if old_sid:
+            try:
+                await self._send_request("session/close", {
+                    "sessionId": old_sid,
+                })
+            except Exception as e:
+                log.warning(f"[{self.agent_name}] session/close [{route_key}] 失败: {e}")
+            self._session_buf.pop(old_sid, None)
+            self._session_last_activity.pop(old_sid, None)
+            self._session_tool_running.pop(old_sid, None)
+            self._session_progress_sent.pop(old_sid, None)
+            self._session_admin_private.pop(old_sid, None)
+            self._session_task_output.pop(old_sid, None)
+            self._session_runtime_config.pop(old_sid, None)
+            self._session_last_message_id.pop(old_sid, None)
+            self._cleanup_rate_limit(old_sid)
+            self._session_raw_buf.pop(old_sid, None)
+            self._pending_qq_msgs.pop(old_sid, None)
+            self._pending_prompts.pop(old_sid, None)
             for mid in list(self._prompt_msg_map):
-                if self._prompt_msg_map[mid] == sid:
+                if self._prompt_msg_map[mid] == old_sid:
                     self._prompt_msg_map.pop(mid, None)
-            self._save_sessions()
-            log.info(f"[{self.agent_name}] 🧹 已重置 session [{route_key}]: {sid}")
-            return True
+            # 保存到历史
+            hist = self._session_history.setdefault(route_key, [])
+            if old_sid not in hist:
+                hist.insert(0, old_sid)
+            self._save_session_history()
+
+        # 创建新 session
+        try:
+            result = await self._send_request("session/new", {
+                "cwd": self.work_dir,
+                "mcpServers": [],
+            })
+            new_sid = result["sessionId"]
         except Exception as e:
-            log.warning(f"[{self.agent_name}] session/close [{route_key}] 失败: {e}")
-            return False
+            log.error(f"[{self.agent_name}] ❌ session/new 失败: {e}", exc_info=True)
+            return False, ""
+        self._route_sessions[route_key] = new_sid
+        self._save_sessions()
+        log.info(f"[{self.agent_name}] 🧹 已重置 session [{route_key}] {old_sid or '(new)'} → {new_sid}")
+        return True, new_sid
+
+    async def resume_route_session(self, route_key: str, session_id: str) -> tuple[bool, str]:
+        """切换到指定 session_id，返回 (成功与否, 信息)"""
+        hist = self._session_history.get(route_key, [])
+        if session_id not in hist:
+            return False, f"会话 {session_id} 不存在于 {route_key} 的历史中"
+        old_sid = self._route_sessions.get(route_key, "")
+        self._route_sessions[route_key] = session_id
+        self._save_sessions()
+        log.info(f"[{self.agent_name}] 🔄 恢复 session [{route_key}] {old_sid} → {session_id}")
+        return True, session_id
 
     @property
     def connected(self) -> bool:

@@ -58,10 +58,27 @@ class WorkerManager:
         w = self.workers.get(worker_name)
         if not w:
             return f"❌ Worker [{worker_name}] 不存在"
-        ok = await w.reset_route_session(route_key)
+        ok, new_sid = await w.reset_route_session(route_key)
         if ok:
-            return f"✅ [{route.get('name', '?')}] session 已重置"
-        return "✅ session 已清空（无活跃 session）"
+            short_id = new_sid[:20] + "..." if len(new_sid) > 23 else new_sid
+            return f"✅ [{route.get('name', '?')}] session 已重置\n新会话: {short_id}"
+        return "❌ session 创建失败"
+
+    async def resume_for_msg(self, msg: dict, session_id: str) -> str:
+        from .config import config, get_route
+        route = get_route(msg["from_id"], msg["type"] == "private",
+                          msg.get("is_mention", False))
+        if not route:
+            return "❌ 未匹配到路由"
+        worker_name = route.get("worker", "")
+        route_key = f"qq:{'private' if msg['type'] == 'private' else 'group'}:{msg['from_id']}"
+        w = self.workers.get(worker_name)
+        if not w:
+            return f"❌ Worker [{worker_name}] 不存在"
+        ok, info = await w.resume_route_session(route_key, session_id)
+        if ok:
+            return f"✅ [{route.get('name', '?')}] 已切换到会话 {session_id[:20]}..."
+        return f"❌ {info}"
 
     async def stop_all(self):
         for w in self.workers.values():

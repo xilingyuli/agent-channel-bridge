@@ -83,7 +83,9 @@ async def handle_admin_cmd(msg: dict, worker_mgr: WorkerManager) -> Optional[str
         return (
             "📋 管理命令:\n"
             "/status          - worker 状态\n"
-            "/reset           - 重置当前会话 session\n"
+            "/reset           - 重置当前会话\n"
+            "/session <id>    - 切换到指定会话\n"
+            "/history         - 列出历史会话\n"
             "/help            - 本帮助"
         )
 
@@ -94,6 +96,38 @@ async def handle_admin_cmd(msg: dict, worker_mgr: WorkerManager) -> Optional[str
     if cmd == "/reset":
         reply = await worker_mgr.reset_for_msg(msg)
         return reply
+
+    if cmd == "/session":
+        parts = t.split(maxsplit=1)
+        if len(parts) < 2:
+            return "用法: /session <session_id 前缀>\n可先用 /history 查看可用会话"
+        sid_prefix = parts[1].strip()
+        w = worker_mgr.workers.get("opencode_agent")
+        if not w:
+            return "❌ Worker 不存在"
+        route_key = f"qq:{'private' if msg['type'] == 'private' else 'group'}:{msg['from_id']}"
+        hist = w.list_session_history(route_key)
+        match = None
+        for h in hist:
+            if h.startswith(sid_prefix):
+                match = h
+                break
+        if not match:
+            return f"❌ 未找到匹配 {sid_prefix} 的会话（{len(hist)} 条历史记录）"
+        return await worker_mgr.resume_for_msg(msg, match)
+
+    if cmd == "/history":
+        route_key = f"qq:{'private' if msg['type'] == 'private' else 'group'}:{msg['from_id']}"
+        w = worker_mgr.workers.get("opencode_agent")
+        if not w:
+            return "❌ Worker 不存在"
+        hist = w.list_session_history(route_key)
+        cur = w._route_sessions.get(route_key, "")
+        lines = [f"📜 历史会话 ({len(hist)} 条):"]
+        for i, sid in enumerate(hist[:10]):
+            marker = " ← 当前" if sid == cur else ""
+            lines.append(f"  {i+1}. {sid[:24]}...{marker}")
+        return "\n".join(lines) if len(lines) > 1 else "暂无历史会话"
 
     return None
 
