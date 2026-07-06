@@ -145,14 +145,12 @@ async def handle_admin_cmd(msg: dict, worker_mgr: WorkerManager) -> Optional[str
 
     if cmd == "/rebridge":
         import subprocess
-        subprocess.Popen(
-            ["bash", "/Users/xilingyuli/Documents/Code/scripts/watchdog_bridge.sh"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        subprocess.Popen(
-            ["bash", "/Users/xilingyuli/Documents/Code/scripts/restart_bridge.sh"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+        # 脚本在 agent-channel-bridge 工程根目录
+        script_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+        watchdog = os.path.join(script_dir, "watchdog_bridge.sh")
+        restart = os.path.join(script_dir, "restart_bridge.sh")
+        subprocess.Popen(["bash", watchdog], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(["bash", restart], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return "🔄 桥接层重启中..."
 
     if cmd == "/session":
