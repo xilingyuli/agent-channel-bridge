@@ -84,6 +84,7 @@ async def handle_admin_cmd(msg: dict, worker_mgr: WorkerManager) -> Optional[str
             "📋 管理命令:\n"
             "/status          - worker 状态\n"
             "/reset           - 重置当前会话\n"
+            "/rebridge        - 重启桥接层\n"
             "/usage           - 查看当前会话 token 消耗\n"
             "/session <id>    - 切换到指定会话\n"
             "/history         - 列出历史会话\n"
@@ -141,6 +142,18 @@ async def handle_admin_cmd(msg: dict, worker_mgr: WorkerManager) -> Optional[str
     if cmd == "/reset":
         reply = await worker_mgr.reset_for_msg(msg)
         return reply
+
+    if cmd == "/rebridge":
+        import subprocess
+        subprocess.Popen(
+            ["bash", "/Users/xilingyuli/Documents/Code/scripts/watchdog_bridge.sh"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        subprocess.Popen(
+            ["bash", "/Users/xilingyuli/Documents/Code/scripts/restart_bridge.sh"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return "🔄 桥接层重启中..."
 
     if cmd == "/session":
         parts = t.split(maxsplit=1)
