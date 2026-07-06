@@ -1185,22 +1185,6 @@ class AcpWorker:
                 await asyncio.wait_for(self.proc.wait(), timeout=5)
             except asyncio.TimeoutError:
                 self.proc.kill()
-        # 清理所有与已杀死子进程相关的运行状态，避免重启后误判 busy
-        self._prompt_msg_map.clear()
-        self._pending_prompts.clear()
-        self._session_tool_running.clear()
-        self._session_progress_sent.clear()
-        self._session_last_activity.clear()
-        self._pending_requests.clear()
-        self._session_admin_private.clear()
-        self._session_task_output.clear()
-        self._session_runtime_config.clear()
-        self._session_last_message_id.clear()
-        self._session_buf.clear()
-        self._session_raw_buf.clear()
-        self._pending_qq_msgs.clear()
-        self._rate_limit_buf.clear()
-        self._rate_limit_last.clear()
 
 
 
