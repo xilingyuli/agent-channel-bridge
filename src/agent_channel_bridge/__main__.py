@@ -84,6 +84,8 @@ async def handle_admin_cmd(msg: dict, worker_mgr: WorkerManager) -> Optional[str
             "📋 管理命令:\n"
             "/status          - worker 状态\n"
             "/reset           - 重置当前会话\n"
+            "/stop            - 停止并重启 OpenCode 子进程\n"
+            "/usage           - 查看当前会话 token 消耗\n"
             "/session <id>    - 切换到指定会话\n"
             "/history         - 列出历史会话\n"
             "/help            - 本帮助"
@@ -93,9 +95,61 @@ async def handle_admin_cmd(msg: dict, worker_mgr: WorkerManager) -> Optional[str
         lines = ["📊 Workers (ACP):"] + worker_mgr.status_lines()
         return "\n".join(lines)
 
+    if cmd == "/usage":
+        w = worker_mgr.workers.get("opencode_agent")
+        if not w:
+            return "❌ Worker 不存在"
+        route_key = f"qq:{'private' if msg['type'] == 'private' else 'group'}:{msg['from_id']}"
+        sid = w._route_sessions.get(route_key, "")
+        if not sid:
+            return "当前路由无活跃会话"
+        try:
+            import subprocess, json as _json
+            r = subprocess.run(["opencode", "db",
+                "SELECT time_created, cost, tokens_input, tokens_output, tokens_reasoning, tokens_cache_read "
+                f"FROM session WHERE id = '{sid}'",
+                "--format", "json"],
+                capture_output=True, text=True, timeout=10)
+            rows = _json.loads(r.stdout)
+            if not rows:
+                return "未找到该会话的用量数据"
+            d = rows[0]
+
+            def fmt(n):
+                if n is None: return "0"
+                if n >= 1_000_000_000: return f"{n/1_000_000_000:.1f}B"
+                if n >= 1_000_000: return f"{n/1_000_000:.1f}M"
+                if n >= 1_000: return f"{n/1_000:.1f}K"
+                return str(n)
+
+            lines = ["📊 当前会话用量:"]
+            if d.get("tokens_input"):
+                lines.append(f"  输入: {fmt(d['tokens_input'])} tokens")
+            if d.get("tokens_output"):
+                lines.append(f"  输出: {fmt(d['tokens_output'])} tokens")
+            if d.get("tokens_reasoning"):
+                lines.append(f"  推理: {fmt(d['tokens_reasoning'])} tokens")
+            if d.get("tokens_cache_read"):
+                lines.append(f"  缓存读取: {fmt(d['tokens_cache_read'])} tokens")
+            if d.get("cost"):
+                lines.append(f"  费用: ¥{d['cost']:.2f}")
+            if not any(d.get(k) for k in ["tokens_input","tokens_output","cost"]):
+                return "暂无用量数据"
+            return "\n".join(lines)
+        except Exception as e:
+            return f"❌ 获取用量失败: {e}"
+
     if cmd == "/reset":
         reply = await worker_mgr.reset_for_msg(msg)
         return reply
+
+    if cmd == "/stop":
+        w = worker_mgr.workers.get("opencode_agent")
+        if not w:
+            return "❌ Worker 不存在"
+        if w._prompt_msg_map:
+            return "⚠️ OpenCode 正在执行任务或等待回复，请稍后再试 /stop"
+        return await worker_mgr.restart_worker("opencode_agent")
 
     if cmd == "/session":
         parts = t.split(maxsplit=1)
@@ -108,11 +162,14 @@ async def handle_admin_cmd(msg: dict, worker_mgr: WorkerManager) -> Optional[str
         route_key = f"qq:{'private' if msg['type'] == 'private' else 'group'}:{msg['from_id']}"
         hist = w.list_session_history(route_key)
         match = None
-        for h in hist:
-            if h.startswith(sid_prefix):
-                match = h
+        for sid in hist:
+            if sid.startswith(sid_prefix):
+                match = sid
                 break
         if not match:
+            # 历史前缀匹配失败，判断是否为完整 session ID（≥30字符）
+            if len(sid_prefix) >= 30 and sid_prefix.startswith("ses_"):
+                return await worker_mgr.restart_for_session(msg, sid_prefix)
             return f"❌ 未找到匹配 {sid_prefix} 的会话（{len(hist)} 条历史记录）"
         return await worker_mgr.resume_for_msg(msg, match)
 
@@ -123,11 +180,33 @@ async def handle_admin_cmd(msg: dict, worker_mgr: WorkerManager) -> Optional[str
             return "❌ Worker 不存在"
         hist = w.list_session_history(route_key)
         cur = w._route_sessions.get(route_key, "")
+        if not hist:
+            return "暂无历史会话"
+
+        # 批量查询 opencode DB 获取时间
+        import subprocess, json as _json
+        try:
+            ids = ",".join(f"'{sid}'" for sid in hist[:20])
+            r = subprocess.run(["opencode", "db",
+                f"SELECT id, title, time_created FROM session WHERE id IN ({ids}) ORDER BY time_created DESC",
+                "--format", "json"],
+                capture_output=True, text=True, timeout=10)
+            db_rows = _json.loads(r.stdout)
+            db_map = {row["id"]: row for row in db_rows}
+        except Exception:
+            db_map = {}
+
         lines = [f"📜 历史会话 ({len(hist)} 条):"]
         for i, sid in enumerate(hist[:10]):
+            row = db_map.get(sid, {})
+            ts = row.get("time_created", 0)
+            ts_str = ""
+            if ts:
+                from datetime import datetime
+                ts_str = datetime.fromtimestamp(ts/1000).strftime("%m-%d %H:%M")
             marker = " ← 当前" if sid == cur else ""
-            lines.append(f"  {i+1}. {sid[:24]}...{marker}")
-        return "\n".join(lines) if len(lines) > 1 else "暂无历史会话"
+            lines.append(f"  {i+1}. [{ts_str}] {sid}{marker}")
+        return "\n".join(lines)
 
     return None
 

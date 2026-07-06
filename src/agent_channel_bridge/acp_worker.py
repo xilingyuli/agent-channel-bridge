@@ -72,12 +72,20 @@ class AcpWorker:
         # session 持久化路径
         self._session_file = os.path.join(work_dir, ".bridge_sessions.json")
         self._history_file = os.path.join(work_dir, ".bridge_session_history.json")
-        # route_key → [session_id, ...] 历史会话（越新越靠前）
+        # route_key → [session_id, ...] 历史会话（越新越靠前，时间从 opencode DB 查询）
         self._session_history: dict[str, list[str]] = {}
         try:
             if os.path.isfile(self._history_file):
                 with open(self._history_file) as f:
-                    self._session_history = json.load(f)
+                    loaded = json.load(f)
+                for rk, entries in loaded.items():
+                    normalized = []
+                    for entry in entries:
+                        if isinstance(entry, str):
+                            normalized.append(entry)
+                        elif isinstance(entry, dict):
+                            normalized.append(entry.get("id", ""))
+                    self._session_history[rk] = normalized
         except Exception:
             pass
 
@@ -384,6 +392,9 @@ class AcpWorker:
                     # Use returned sessionId (wrapper may create new one)
                     new_sid = result.get("sessionId", sid)
                     restored[route_key] = new_sid
+                    hist = self._session_history.setdefault(route_key, [])
+                    if new_sid not in hist:
+                        hist.insert(0, new_sid)
                     log.info(f"[{self.agent_name}] 🔄 恢复 Session [{route_key}]: {new_sid}")
                 except Exception as e:
                     log.info(f"[{self.agent_name}] ⏭ Session [{route_key}] 恢复失败，后续会重建: {e}")
@@ -1080,7 +1091,7 @@ class AcpWorker:
             for mid in list(self._prompt_msg_map):
                 if self._prompt_msg_map[mid] == old_sid:
                     self._prompt_msg_map.pop(mid, None)
-            # 保存到历史
+            # 保存到历史（纯 ID，时间从 opencode DB 查询）
             hist = self._session_history.setdefault(route_key, [])
             if old_sid not in hist:
                 hist.insert(0, old_sid)
@@ -1102,15 +1113,30 @@ class AcpWorker:
         return True, new_sid
 
     async def resume_route_session(self, route_key: str, session_id: str) -> tuple[bool, str]:
-        """切换到指定 session_id，返回 (成功与否, 信息)"""
+        """切换到指定 session_id，返回 (成功与否, 信息)
+        先尝试 ACP session/resume 恢复原会话；
+        若失败则返回错误提示。
+        """
         hist = self._session_history.get(route_key, [])
-        if session_id not in hist:
+        hist_ids = {(h["id"] if isinstance(h, dict) else h) for h in hist}
+        if session_id not in hist_ids:
             return False, f"会话 {session_id} 不存在于 {route_key} 的历史中"
         old_sid = self._route_sessions.get(route_key, "")
-        self._route_sessions[route_key] = session_id
-        self._save_sessions()
-        log.info(f"[{self.agent_name}] 🔄 恢复 session [{route_key}] {old_sid} → {session_id}")
-        return True, session_id
+
+        # 尝试 ACP 层面恢复
+        try:
+            result = await self._send_request("session/resume", {
+                "sessionId": session_id,
+                "cwd": self.work_dir,
+            })
+            new_sid = result.get("sessionId", session_id)
+            self._route_sessions[route_key] = new_sid
+            self._save_sessions()
+            log.info(f"[{self.agent_name}] 🔄 恢复 session [{route_key}] {old_sid or '(new)'} → {new_sid}")
+            return True, f"已恢复会话 {new_sid}"
+        except Exception as e:
+            log.info(f"[{self.agent_name}] ⚠️ session/resume [{route_key}] 失败: {e}")
+            return False, f"会话 {session_id[:20]}... 已失效（worker 可能已重启），无法恢复"
 
     @property
     def connected(self) -> bool:

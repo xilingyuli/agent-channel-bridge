@@ -46,31 +46,26 @@ cmd_start() {
 cmd_stop() {
     local pidf=$(pidfile)
 
-    if [ ! -f "$pidf" ]; then
-        echo "  ⏩ Bridge 未运行"
-        return 0
+    echo "🛑 停止 Bridge..."
+
+    # 1. 先杀 PID 文件记录的进程（如果还有效）
+    if [ -f "$pidf" ]; then
+        local pid=$(cat "$pidf")
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+            for i in $(seq 1 10); do
+                if ! kill -0 "$pid" 2>/dev/null; then break; fi
+                sleep 1
+            done
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+        rm -f "$pidf"
     fi
 
-    local pid=$(cat "$pidf")
-    echo "🛑 停止 Bridge (PID: $pid)..."
+    # 2. 兜底：pkill 清理所有 agent_channel_bridge 残留进程（防止旧 PID 文件丢失导致孤儿进程）
+    pkill -f "agent_channel_bridge" 2>/dev/null || true
+    sleep 1
 
-    if kill -0 "$pid" 2>/dev/null; then
-        kill "$pid" 2>/dev/null || true
-        # 等待进程退出
-        for i in $(seq 1 10); do
-            if ! kill -0 "$pid" 2>/dev/null; then
-                break
-            fi
-            sleep 1
-        done
-    fi
-
-    # 强制 kill 如果还在
-    if kill -0 "$pid" 2>/dev/null; then
-        kill -9 "$pid" 2>/dev/null || true
-    fi
-
-    rm -f "$pidf"
     echo "  ✅ Bridge 已停止"
 }
 
