@@ -440,6 +440,8 @@ class AcpWorker:
         log.info(f"[{self.agent_name}] ✅ ACP 初始化完成")
         self._connected = True
 
+        # 重新创建回复队列（避免 stop() 残留的 None 哨兵导致新 worker 立即退出）
+        self._reply_queue = asyncio.Queue()
         # 启动统一回复收口
         self._reply_worker_task = asyncio.create_task(self._reply_worker())
 
@@ -477,6 +479,9 @@ class AcpWorker:
                         pass
         except Exception as e:
             log.error(f"[{self.agent_name}] stdout 读取错误: {e}")
+        finally:
+            log.warning(f"[{self.agent_name}] stdout 读取结束，标记为离线")
+            self._connected = False
 
     async def _handle_message(self, msg: dict):
         log_rpc(self.agent_name, "<<", msg)
@@ -745,6 +750,11 @@ class AcpWorker:
             log.warning(f"[{self.agent_name}] ACP 未就绪")
             return
 
+        if self.proc and self.proc.returncode is not None:
+            log.warning(f"[{self.agent_name}] 子进程已退出 (code={self.proc.returncode})，标记离线")
+            self._connected = False
+            return
+
         # 检查是否为管理员私聊（该模式下所有输出直接转发，不等待 </message>）
         is_admin_private = False
         if qq_msg:
@@ -983,6 +993,13 @@ class AcpWorker:
 
     def _send_request_bg(self, method: str, params: dict, sid: str = ""):
         """后台发送 JSON-RPC 请求，不等待回复"""
+        if not self._connected:
+            log.warning(f"[{self.agent_name}] ACP 未就绪，后台请求跳过: {method}")
+            return
+        if self.proc and self.proc.returncode is not None:
+            log.warning(f"[{self.agent_name}] 子进程已退出 (code={self.proc.returncode})，标记离线")
+            self._connected = False
+            return
         self._msg_id += 1
         msg_id = str(self._msg_id)
         if sid and method == "session/prompt":
@@ -1012,8 +1029,14 @@ class AcpWorker:
         self._pending_requests[msg_id] = fut
 
         if self.proc and self.proc.stdin:
-            self.proc.stdin.write((json.dumps(msg) + "\n").encode())
-            await self.proc.stdin.drain()
+            try:
+                self.proc.stdin.write((json.dumps(msg) + "\n").encode())
+                await self.proc.stdin.drain()
+            except (ConnectionResetError, BrokenPipeError, ProcessLookupError) as e:
+                log.warning(f"[{self.agent_name}] pipe closed by peer or os.write(pipe, data) raised exception.")
+                self._connected = False
+                self._pending_requests.pop(msg_id, None)
+                raise
 
         try:
             return await asyncio.wait_for(fut, timeout=30)
@@ -1162,6 +1185,22 @@ class AcpWorker:
                 await asyncio.wait_for(self.proc.wait(), timeout=5)
             except asyncio.TimeoutError:
                 self.proc.kill()
+        # 清理所有与已杀死子进程相关的运行状态，避免重启后误判 busy
+        self._prompt_msg_map.clear()
+        self._pending_prompts.clear()
+        self._session_tool_running.clear()
+        self._session_progress_sent.clear()
+        self._session_last_activity.clear()
+        self._pending_requests.clear()
+        self._session_admin_private.clear()
+        self._session_task_output.clear()
+        self._session_runtime_config.clear()
+        self._session_last_message_id.clear()
+        self._session_buf.clear()
+        self._session_raw_buf.clear()
+        self._pending_qq_msgs.clear()
+        self._rate_limit_buf.clear()
+        self._rate_limit_last.clear()
 
 
 

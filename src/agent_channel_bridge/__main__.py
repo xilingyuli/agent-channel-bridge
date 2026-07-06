@@ -84,7 +84,6 @@ async def handle_admin_cmd(msg: dict, worker_mgr: WorkerManager) -> Optional[str
             "📋 管理命令:\n"
             "/status          - worker 状态\n"
             "/reset           - 重置当前会话\n"
-            "/stop            - 停止并重启 OpenCode 子进程\n"
             "/usage           - 查看当前会话 token 消耗\n"
             "/session <id>    - 切换到指定会话\n"
             "/history         - 列出历史会话\n"
@@ -143,12 +142,6 @@ async def handle_admin_cmd(msg: dict, worker_mgr: WorkerManager) -> Optional[str
         reply = await worker_mgr.reset_for_msg(msg)
         return reply
 
-    if cmd == "/stop":
-        w = worker_mgr.workers.get("opencode_agent")
-        if not w:
-            return "❌ Worker 不存在"
-        return await worker_mgr.restart_worker("opencode_agent")
-
     if cmd == "/session":
         parts = t.split(maxsplit=1)
         if len(parts) < 2:
@@ -165,9 +158,6 @@ async def handle_admin_cmd(msg: dict, worker_mgr: WorkerManager) -> Optional[str
                 match = sid
                 break
         if not match:
-            # 历史前缀匹配失败，判断是否为完整 session ID（≥30字符）
-            if len(sid_prefix) >= 30 and sid_prefix.startswith("ses_"):
-                return await worker_mgr.restart_for_session(msg, sid_prefix)
             return f"❌ 未找到匹配 {sid_prefix} 的会话（{len(hist)} 条历史记录）"
         return await worker_mgr.resume_for_msg(msg, match)
 
