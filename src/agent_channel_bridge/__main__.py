@@ -147,8 +147,6 @@ async def handle_admin_cmd(msg: dict, worker_mgr: WorkerManager) -> Optional[str
         w = worker_mgr.workers.get("opencode_agent")
         if not w:
             return "❌ Worker 不存在"
-        if w._prompt_msg_map:
-            return "⚠️ OpenCode 正在执行任务或等待回复，请稍后再试 /stop"
         return await worker_mgr.restart_worker("opencode_agent")
 
     if cmd == "/session":
