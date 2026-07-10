@@ -943,6 +943,7 @@ class AcpWorker:
             ctx_lines.append("  1. 正文直接输出，无需用 XML/标签包裹")
             ctx_lines.append("  2. 思考过程、内部推理以及 read/execute 等工具执行结果不要输出给用户")
             ctx_lines.append("  3. 正文应当展示为适合在 QQ 端呈现的纯文本格式。禁止使用 markdown/XML 语法和表格格式。")
+            ctx_lines.append("  4. 需要展示给用户的内容（名单、数据、分析结论）必须在正文中输出，禁止放在工具执行结果部分。QQ 端无法看到工具执行结果内容。")
         else:
             ctx_lines.append("【回复规则】")
             ctx_lines.append("  1. 每条独立回复用 <message> 包裹，支持一次输出多条：")
