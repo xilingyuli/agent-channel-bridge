@@ -44,6 +44,8 @@ class AcpWorker:
         self._session_progress_sent: dict[str, bool] = {}
         # sessionId → 是否为管理员私聊（该模式下所有 agent_message_chunk 直接转发，不等待 </message>）
         self._session_admin_private: dict[str, bool] = {}
+        # sessionId → 本次 prompt 是否视作管理员消息（用于 system context 拼接，不影响输出模式）
+        self._session_prompt_admin: dict[str, bool] = {}
         # sessionId → 管理员私聊的原始文本缓冲区
         self._session_raw_buf: dict[str, str] = {}
         # 按 key 分类的频控缓冲区与上次发送时间（key: tool_call, tool_call_update_bash 等）
@@ -756,13 +758,21 @@ class AcpWorker:
             return
 
         # 检查是否为管理员私聊（该模式下所有输出直接转发，不等待 </message>）
+        # 以及是否为管理员消息（用于 system context 拼接）
         is_admin_private = False
+        is_prompt_admin = False
         if qq_msg:
             is_private = qq_msg.get("type") == "private"
-            route_key = f"qq:private:{qq_msg['user_id']}" if is_private else f"qq:group:{qq_msg['from_id']}"
             if is_private:
-                route = config.get("routes", {}).get(route_key)
+                route_key = f"qq:private:{qq_msg['user_id']}"
+            else:
+                route_key = f"qq:group:{qq_msg['from_id']}"
+            route = config.get("routes", {}).get(route_key)
+            if is_private:
                 is_admin_private = bool(route and route.get("admin"))
+            # 管理员路由 + 原始消息含"我是管理员" → 本次视作管理员消息
+            if qq_msg.get("_is_admin_route", False) and "我是管理员" in qq_msg.get("message", ""):
+                is_prompt_admin = True
         else:
             route_key = "_default"
 
@@ -810,6 +820,7 @@ class AcpWorker:
             self._session_tool_running.pop(sid, None)
             self._session_progress_sent.pop(sid, None)
             self._session_admin_private.pop(sid, None)
+            self._session_prompt_admin.pop(sid, None)
             self._session_task_output.pop(sid, None)
             self._session_runtime_config.pop(sid, None)
             self._session_last_message_id.pop(sid, None)
@@ -845,6 +856,7 @@ class AcpWorker:
         self._session_last_message_id.pop(sid, None)  # 清除上一条 messageId
         self._session_task_output.pop(sid, None)  # 清除上一轮子代理输出
         self._session_admin_private[sid] = is_admin_private
+        self._session_prompt_admin[sid] = is_prompt_admin
         self._session_runtime_config[sid] = self._load_runtime_config()
 
         await self._do_send_prompt(sid, route_key, text, qq_msg)
@@ -859,17 +871,22 @@ class AcpWorker:
             del self._pending_prompts[sid]
 
         is_admin_private = False
+        is_prompt_admin = False
         if qq_msg:
             is_private = qq_msg.get("type") == "private"
+            route = config.get("routes", {}).get(route_key) if is_private else None
             if is_private:
-                route = config.get("routes", {}).get(route_key)
                 is_admin_private = bool(route and route.get("admin"))
+            # 管理员路由 + 原始消息含"我是管理员" → 本次视作管理员消息
+            if qq_msg.get("_is_admin_route", False) and "我是管理员" in qq_msg.get("message", ""):
+                is_prompt_admin = True
 
         self._push_qq_msg(sid, qq_msg or {})
         self._session_buf.pop(sid, None)
         self._session_progress_sent.pop(sid, None)
         self._session_raw_buf.pop(sid, None)
         self._session_admin_private[sid] = is_admin_private
+        self._session_prompt_admin[sid] = is_prompt_admin
         self._session_runtime_config[sid] = self._load_runtime_config()
 
         await self._do_send_prompt(sid, route_key, text, qq_msg)
@@ -885,12 +902,13 @@ class AcpWorker:
         sender = qq_msg.get("sender_name", "用户") if qq_msg else "用户"
         user_id = qq_msg.get("user_id", "") if qq_msg else ""
         is_admin = self._session_admin_private.get(sid, False)
+        is_prompt_admin = self._session_prompt_admin.get(sid, False) or is_admin
         ctx_lines.append(f"你正在通过QQ和用户对话。来源: {src}，发送者: {sender}。")
         # 群聊时附加群名片
         card = qq_msg.get("card_name", "") if qq_msg else ""
         if card and card != sender:
             ctx_lines.append(f"用户群名片: {card}")
-        ctx_lines.append(f"此次消息视作{'管理员' if is_admin else '非管理员'}消息。")
+        ctx_lines.append(f"此次消息视作{'管理员' if is_prompt_admin else '非管理员'}消息。")
 
         # 处理 CQ reply（引用消息）
         if qq_msg and qq_msg.get("reply_id"):
@@ -1077,6 +1095,7 @@ class AcpWorker:
             self._session_tool_running.pop(sid, None)
             self._session_progress_sent.pop(sid, None)
             self._session_admin_private.pop(sid, None)
+            self._session_prompt_admin.pop(sid, None)
             self._session_task_output.pop(sid, None)
             self._session_runtime_config.pop(sid, None)
             self._session_last_message_id.pop(sid, None)
@@ -1105,6 +1124,7 @@ class AcpWorker:
             self._session_tool_running.pop(old_sid, None)
             self._session_progress_sent.pop(old_sid, None)
             self._session_admin_private.pop(old_sid, None)
+            self._session_prompt_admin.pop(old_sid, None)
             self._session_task_output.pop(old_sid, None)
             self._session_runtime_config.pop(old_sid, None)
             self._session_last_message_id.pop(old_sid, None)

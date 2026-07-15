@@ -72,7 +72,15 @@ def is_admin(msg: dict) -> bool:
     route_key = f"qq:{msg['type']}:{msg['from_id']}"
     routes = cfg.config.get("routes", {})
     route = routes.get(route_key)
-    return bool(route and route.get("admin"))
+    if route and route.get("admin"):
+        return True
+    # 群聊时，也检查发送者的私聊路由是否为 admin
+    if msg["type"] == "group":
+        private_key = f"qq:private:{msg['user_id']}"
+        route = routes.get(private_key)
+        if route and route.get("admin"):
+            return True
+    return False
 
 
 async def handle_admin_cmd(msg: dict, worker_mgr: WorkerManager) -> Optional[str]:
@@ -276,6 +284,8 @@ async def process_message(ws, msg: dict, worker_mgr: WorkerManager):
         message_text = GROUP_ADMIN_SECURITY_PROMPT + message_text
 
     # 发送到 agent（异步，不等回复）
+    # 传递 admin 标记给 worker，用于 prompt 拼接判断
+    msg["_is_admin_route"] = admin
     log.info(f"⚡ {route_name} → ACP [{worker_name}]" + (" [非管理员]" if not admin else ""))
     await worker_mgr.send_message(worker_name, message_text, qq_msg=msg)
 
