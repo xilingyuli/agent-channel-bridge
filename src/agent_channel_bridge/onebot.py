@@ -108,8 +108,10 @@ def _build_message_segments(text: str) -> list:
 
 async def send_group_msg(group_id: int, text: str, at_user: str = "") -> bool:
     segments = _build_message_segments(text)
-    if at_user and not text.lstrip().startswith("@"):
-        segments.insert(0, {"type": "at", "data": {"qq": at_user}})
+    if at_user:
+        has_at = any(s.get("type") == "at" for s in segments)
+        if not has_at:
+            segments.insert(0, {"type": "at", "data": {"qq": at_user}})
     result = await send_api_action("send_group_msg", {
         "group_id": group_id,
         "message": segments,
