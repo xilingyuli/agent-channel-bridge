@@ -57,10 +57,10 @@ def _build_message_segments(text: str) -> list:
     clean = clean.strip()
 
     segments = []
+    last_end = 0
     if clean:
         # 拆分 @QQ号 为 OneBot at 段
         at_re = re.compile(r"@(\d{5,11})")
-        last_end = 0
         for m in at_re.finditer(clean):
             if m.start() > last_end:
                 segments.append({"type": "text", "data": {"text": clean[last_end:m.start()]}})
@@ -70,7 +70,7 @@ def _build_message_segments(text: str) -> list:
         remaining = clean[last_end:].strip()
         if remaining:
             segments.append({"type": "text", "data": {"text": remaining[:2000]}})
-    elif last_end == 0:
+    elif last_end == 0 and clean:
         segments.append({"type": "text", "data": {"text": clean[:2000]}})
     for url in image_urls:
         if os.path.isfile(url):
